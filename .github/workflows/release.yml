@@ -55,7 +55,6 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-slim
             ${{ env.IMAGE }}:slim
-            ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -68,6 +67,7 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-full
             ${{ env.IMAGE }}:full
+            ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
