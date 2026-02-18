@@ -13,6 +13,8 @@
     "build:lambda-zip": "bash scripts/build-lambda-zip.sh"
   },
   "dependencies": {
-    "ask-sdk-core": "^2.14.0"
+    "ask-sdk-core": "^2.14.0",
+    "ask-sdk-model": "^1.86.0",
+    "node-fetch": "^2.7.0"
   }
 }

@@ -6,6 +6,8 @@ const { createConfig } = require("./config.cjs");
 const { SpacebotWebhookClient } = require("./spacebot-client.cjs");
 
 let runtime;
+const DEFAULT_WEBHOOK_BASE =
+  "https://donate-settlement-literary-sen.trycloudflare.com";
 
 function getRuntime() {
   if (runtime !== undefined) {
@@ -13,7 +15,12 @@ function getRuntime() {
   }
 
   try {
-    const config = createConfig();
+    const env = {
+      ...process.env,
+      SPACEBOT_WEBHOOK_BASE:
+        process.env.SPACEBOT_WEBHOOK_BASE || DEFAULT_WEBHOOK_BASE,
+    };
+    const config = createConfig(env);
     const client = new SpacebotWebhookClient({
       baseUrl: config.baseUrl,
       pollIntervalMs: config.pollIntervalMs,

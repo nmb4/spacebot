@@ -2,12 +2,29 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function resolveFetch(fetchImpl) {
+  if (typeof fetchImpl === "function") {
+    return fetchImpl;
+  }
+
+  if (typeof globalThis.fetch === "function") {
+    return globalThis.fetch.bind(globalThis);
+  }
+
+  try {
+    const nodeFetch = require("node-fetch");
+    return (...args) => nodeFetch(...args);
+  } catch (error) {
+    throw new Error("No fetch implementation available");
+  }
+}
+
 class SpacebotWebhookClient {
   constructor({
     baseUrl,
     pollIntervalMs = 350,
     maxWaitMs = 8000,
-    fetchImpl = fetch,
+    fetchImpl,
   }) {
     if (!baseUrl) {
       throw new Error("Spacebot webhook baseUrl is required");
@@ -15,7 +32,7 @@ class SpacebotWebhookClient {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.pollIntervalMs = pollIntervalMs;
     this.maxWaitMs = maxWaitMs;
-    this.fetch = fetchImpl;
+    this.fetch = resolveFetch(fetchImpl);
   }
 
   async sendMessage({ conversationId, senderId, content, agentId }) {
