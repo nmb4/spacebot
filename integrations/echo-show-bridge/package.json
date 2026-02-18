@@ -1,0 +1,18 @@
+{
+  "name": "spacebot-echo-show-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Alexa Echo Show bridge for Spacebot via webhook messaging adapter",
+  "main": "src/index.cjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "invoke:local": "node scripts/invoke-local.cjs examples/event.chat-intent.json",
+    "build:lambda-zip": "bash scripts/build-lambda-zip.sh"
+  },
+  "dependencies": {
+    "ask-sdk-core": "^2.14.0"
+  }
+}

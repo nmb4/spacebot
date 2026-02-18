@@ -1,0 +1,45 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-US": {
+          "name": "Spacebot Echo",
+          "summary": "Talk to your Spacebot agent from Echo Show.",
+          "description": "A private Echo Show bridge that sends voice requests to Spacebot and can render structured visual cards.",
+          "examplePhrases": [
+            "Alexa, open Space Bot",
+            "Alexa, ask Space Bot for my current tasks",
+            "Alexa, tell Space Bot to show project status"
+          ]
+        }
+      },
+      "isAvailableWorldwide": false,
+      "testingInstructions": "Private development skill for personal account usage.",
+      "category": "PRODUCTIVITY",
+      "distributionCountries": [
+        "US"
+      ]
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "ask-custom-spacebot-default"
+        },
+        "interfaces": [
+          {
+            "type": "ALEXA_PRESENTATION_APL"
+          }
+        ]
+      }
+    },
+    "manifestVersion": "1.0",
+    "permissions": [],
+    "privacyAndCompliance": {
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false
+    }
+  }
+}

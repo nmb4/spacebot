@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "session": {
+    "new": false,
+    "sessionId": "SessionId.echo-local-test",
+    "application": {
+      "applicationId": "amzn1.ask.skill.example"
+    },
+    "user": {
+      "userId": "amzn1.ask.account.example-user"
+    }
+  },
+  "context": {
+    "System": {
+      "application": {
+        "applicationId": "amzn1.ask.skill.example"
+      },
+      "user": {
+        "userId": "amzn1.ask.account.example-user"
+      },
+      "device": {
+        "deviceId": "amzn1.ask.device.example-device",
+        "supportedInterfaces": {
+          "Alexa.Presentation.APL": {}
+        }
+      }
+    }
+  },
+  "request": {
+    "type": "IntentRequest",
+    "requestId": "EdwRequestId.example",
+    "intent": {
+      "name": "ChatIntent",
+      "slots": {
+        "query": {
+          "name": "query",
+          "value": "Summarize my current tasks and show them on screen."
+        }
+      }
+    },
+    "locale": "en-US",
+    "timestamp": "2026-02-18T00:00:00Z"
+  }
+}
