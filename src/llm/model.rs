@@ -8,7 +8,7 @@ use crate::llm::routing::{
 use rig::completion::{self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage};
 use rig::message::{
     AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
-    ToolResult, UserContent,
+    UserContent,
 };
 use rig::one_or_many::OneOrMany;
 use rig::streaming::StreamingCompletionResponse;
@@ -377,7 +377,7 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(&request.chat_history, false));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -466,7 +466,7 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(&request.chat_history, false));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -554,7 +554,7 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(&request.chat_history, false));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -659,7 +659,10 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(
+            &request.chat_history,
+            provider_id == "kimi-coding",
+        ));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -692,12 +695,32 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self
+        let mut request_builder = self
             .llm_manager
             .http_client()
             .post(endpoint)
             .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        if provider_id == "kimi-coding" {
+            // Kimi Coding API checks for coding-agent traffic and rejects generic clients.
+            request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
+
+            if let Some(messages) = body["messages"].as_array() {
+                let stats = collect_assistant_tool_call_reasoning_stats(messages);
+                tracing::debug!(
+                    provider = provider_id,
+                    total_messages = messages.len(),
+                    assistant_tool_call_messages = stats.assistant_tool_call_messages,
+                    messages_with_reasoning_content = stats.messages_with_reasoning_content,
+                    messages_with_empty_reasoning_content = stats.messages_with_empty_reasoning_content,
+                    missing_reasoning_content_indices = ?stats.missing_reasoning_content_indices,
+                    "sending kimi-coding request"
+                );
+            }
+        }
+
+        let response = request_builder
             .json(&body)
             .send()
             .await
@@ -833,6 +856,62 @@ fn tool_result_content_to_string(content: &OneOrMany<rig::message::ToolResultCon
         .join("\n")
 }
 
+#[derive(Debug)]
+struct AssistantToolCallReasoningStats {
+    assistant_tool_call_messages: usize,
+    messages_with_reasoning_content: usize,
+    messages_with_empty_reasoning_content: usize,
+    missing_reasoning_content_indices: Vec<usize>,
+}
+
+fn collect_assistant_tool_call_reasoning_stats(
+    messages: &[serde_json::Value],
+) -> AssistantToolCallReasoningStats {
+    let mut stats = AssistantToolCallReasoningStats {
+        assistant_tool_call_messages: 0,
+        messages_with_reasoning_content: 0,
+        messages_with_empty_reasoning_content: 0,
+        missing_reasoning_content_indices: Vec::new(),
+    };
+
+    for (index, message) in messages.iter().enumerate() {
+        let is_assistant = message["role"].as_str() == Some("assistant");
+        let has_tool_calls = message["tool_calls"]
+            .as_array()
+            .map(|tool_calls| !tool_calls.is_empty())
+            .unwrap_or(false);
+
+        if !(is_assistant && has_tool_calls) {
+            continue;
+        }
+
+        stats.assistant_tool_call_messages += 1;
+
+        match &message["reasoning_content"] {
+            serde_json::Value::String(value) => {
+                stats.messages_with_reasoning_content += 1;
+                if value.is_empty() {
+                    stats.messages_with_empty_reasoning_content += 1;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                stats.messages_with_reasoning_content += 1;
+                if values.is_empty() {
+                    stats.messages_with_empty_reasoning_content += 1;
+                }
+            }
+            serde_json::Value::Null => {
+                stats.missing_reasoning_content_indices.push(index);
+            }
+            _ => {
+                stats.messages_with_reasoning_content += 1;
+            }
+        }
+    }
+
+    stats
+}
+
 // --- Message conversion ---
 
 fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
@@ -879,7 +958,10 @@ fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde_jso
         .collect()
 }
 
-fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
+fn convert_messages_to_openai(
+    messages: &OneOrMany<Message>,
+    include_reasoning_content: bool,
+) -> Vec<serde_json::Value> {
     let mut result = Vec::new();
 
     for message in messages.iter() {
@@ -934,6 +1016,7 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
             Message::Assistant { content, .. } => {
                 let mut text_parts = Vec::new();
                 let mut tool_calls = Vec::new();
+                let mut reasoning_parts = Vec::new();
 
                 for item in content.iter() {
                     match item {
@@ -953,6 +1036,9 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                                 }
                             }));
                         }
+                        AssistantContent::Reasoning(reasoning) => {
+                            reasoning_parts.extend(reasoning.reasoning.iter().cloned());
+                        }
                         _ => {}
                     }
                 }
@@ -963,6 +1049,9 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                 }
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = serde_json::json!(tool_calls);
+                }
+                if include_reasoning_content && !tool_calls.is_empty() {
+                    msg["reasoning_content"] = serde_json::json!(reasoning_parts.join("\n"));
                 }
                 result.push(msg);
             }
@@ -1117,6 +1206,24 @@ fn parse_openai_response(
         }
     }
 
+    if let Some(reasoning_content) = choice["reasoning_content"].as_str() {
+        if !reasoning_content.is_empty() {
+            assistant_content.push(AssistantContent::Reasoning(rig::message::Reasoning::new(
+                reasoning_content,
+            )));
+        }
+    } else if let Some(reasoning_parts) = choice["reasoning_content"].as_array() {
+        let reasoning: Vec<String> = reasoning_parts
+            .iter()
+            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+            .collect();
+        if !reasoning.is_empty() {
+            assistant_content.push(AssistantContent::Reasoning(rig::message::Reasoning::multi(
+                reasoning,
+            )));
+        }
+    }
+
     if let Some(tool_calls) = choice["tool_calls"].as_array() {
         for tc in tool_calls {
             let id = tc["id"].as_str().unwrap_or("").to_string();
@@ -1152,4 +1259,96 @@ fn parse_openai_response(
         },
         raw_response: RawResponse { body },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig::message::Reasoning;
+
+    #[test]
+    fn test_convert_messages_to_openai_adds_kimi_reasoning_content_for_tool_calls() {
+        let assistant_content = OneOrMany::many(vec![AssistantContent::ToolCall(make_tool_call(
+            "call_1".to_string(),
+            "shell".to_string(),
+            serde_json::json!({"command": "ls"}),
+        ))])
+        .unwrap();
+        let messages = OneOrMany::many(vec![Message::Assistant {
+            id: None,
+            content: assistant_content,
+        }])
+        .unwrap();
+
+        let converted = convert_messages_to_openai(&messages, true);
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["reasoning_content"], "");
+        assert!(converted[0]["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn test_convert_messages_to_openai_keeps_reasoning_content_when_present() {
+        let assistant_content = OneOrMany::many(vec![
+            AssistantContent::Reasoning(Reasoning::new("first")),
+            AssistantContent::Reasoning(Reasoning::new("second")),
+            AssistantContent::ToolCall(make_tool_call(
+                "call_1".to_string(),
+                "shell".to_string(),
+                serde_json::json!({"command": "ls"}),
+            )),
+        ])
+        .unwrap();
+        let messages = OneOrMany::many(vec![Message::Assistant {
+            id: None,
+            content: assistant_content,
+        }])
+        .unwrap();
+
+        let converted = convert_messages_to_openai(&messages, true);
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["reasoning_content"], "first\nsecond");
+    }
+
+    #[test]
+    fn test_parse_openai_response_extracts_reasoning_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "plan it",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"ls\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {}
+        });
+
+        let parsed = parse_openai_response(body, "Test").expect("response should parse");
+        let mut saw_reasoning = false;
+        let mut saw_tool_call = false;
+
+        for item in parsed.choice.iter() {
+            match item {
+                AssistantContent::Reasoning(reasoning) => {
+                    saw_reasoning = true;
+                    assert_eq!(reasoning.reasoning, vec!["plan it".to_string()]);
+                }
+                AssistantContent::ToolCall(tool_call) => {
+                    saw_tool_call = true;
+                    assert_eq!(tool_call.function.name, "shell");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_reasoning);
+        assert!(saw_tool_call);
+    }
 }
