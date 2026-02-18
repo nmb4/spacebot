@@ -8,6 +8,8 @@ const { SpacebotWebhookClient } = require("./spacebot-client.cjs");
 let runtime;
 const DEFAULT_WEBHOOK_BASE =
   "https://donate-settlement-literary-sen.trycloudflare.com";
+const MAX_SPEECH_LEN = 700;
+const MAX_CARD_LEN = 780;
 
 function getRuntime() {
   if (runtime !== undefined) {
@@ -46,6 +48,27 @@ function buildNotConfiguredResponse(handlerInput) {
 
 function getQueryFromIntent(request) {
   return request?.intent?.slots?.query?.value?.trim() || "";
+}
+
+function normalizeText(text, maxLen) {
+  if (typeof text !== "string") {
+    return "";
+  }
+
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[<>&]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+}
+
+function makeSafeSpeech(text) {
+  return normalizeText(text, MAX_SPEECH_LEN) || "I have an update for you.";
+}
+
+function makeSafeCardText(text) {
+  return normalizeText(text, MAX_CARD_LEN) || "No details available.";
 }
 
 const LaunchRequestHandler = {
@@ -99,10 +122,13 @@ const ChatIntentHandler = {
       agentId: runtimeState.config.agentId,
     });
 
+    const safeSpeech = makeSafeSpeech(result.speechText);
+    const safeCardText = makeSafeCardText(result.speechText);
+
     const response = handlerInput.responseBuilder
-      .speak(result.speechText)
+      .speak(safeSpeech)
       .reprompt("Anything else for Spacebot?")
-      .withSimpleCard("Spacebot Echo", result.speechText);
+      .withSimpleCard("Spacebot Echo", safeCardText);
 
     if (result.directive && supportsApl(handlerInput.requestEnvelope)) {
       response.addDirective(buildAplDirective(result.directive));

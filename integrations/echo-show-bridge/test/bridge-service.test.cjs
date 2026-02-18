@@ -5,6 +5,7 @@ const {
   buildSpacebotPrompt,
   handleChatTurn,
   VISUAL_PROMPT_PREAMBLE,
+  TIMEOUT_FALLBACK_SPEECH,
 } = require("../src/bridge-service.cjs");
 
 function makeEnvelope() {
@@ -68,4 +69,30 @@ test("handleChatTurn sends prompt and parses directive", async () => {
   assert.equal(result.speechText, "Here is the status.");
   assert.ok(result.directive);
   assert.equal(result.directive.template, "content_list_v1");
+});
+
+test("handleChatTurn uses timeout fallback speech when no reply is ready", async () => {
+  const mockClient = {
+    async sendMessage() {},
+    async collectReply() {
+      return {
+        text: "",
+        rawMessages: [],
+        timedOut: true,
+      };
+    },
+  };
+
+  const result = await handleChatTurn({
+    requestEnvelope: makeEnvelope(),
+    userText: "status report",
+    client: mockClient,
+    conversationPrefix: "echo_show",
+    userHashSalt: "salt",
+    agentId: "main",
+  });
+
+  assert.equal(result.speechText, TIMEOUT_FALLBACK_SPEECH);
+  assert.equal(result.directive, null);
+  assert.equal(result.timedOut, true);
 });

@@ -12,6 +12,9 @@ const VISUAL_PROMPT_PREAMBLE = [
   "- Keep text clear and compact for a small display.",
 ].join("\n");
 
+const TIMEOUT_FALLBACK_SPEECH =
+  "Spacebot braucht noch etwas laenger. Bitte versuch es gleich noch einmal.";
+
 function buildSpacebotPrompt(userText) {
   return `${VISUAL_PROMPT_PREAMBLE}\n\nUser message:\n${userText.trim()}`;
 }
@@ -40,7 +43,10 @@ async function handleChatTurn({
 
   const reply = await client.collectReply(conversation.conversationId);
   const parsed = extractVisualDirective(reply.text);
-  const speechText = parsed.speechText || "I have an update for you.";
+  let speechText = parsed.speechText || "I have an update for you.";
+  if (reply.timedOut && !parsed.speechText) {
+    speechText = TIMEOUT_FALLBACK_SPEECH;
+  }
 
   return {
     conversationId: conversation.conversationId,
@@ -48,6 +54,7 @@ async function handleChatTurn({
     speechText,
     directive: parsed.directive,
     rawMessages: reply.rawMessages,
+    timedOut: reply.timedOut,
   };
 }
 
@@ -55,4 +62,5 @@ module.exports = {
   buildSpacebotPrompt,
   handleChatTurn,
   VISUAL_PROMPT_PREAMBLE,
+  TIMEOUT_FALLBACK_SPEECH,
 };

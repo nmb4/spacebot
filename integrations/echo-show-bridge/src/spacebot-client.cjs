@@ -73,6 +73,7 @@ class SpacebotWebhookClient {
     const rawMessages = [];
     let sawAnyResponse = false;
     let sawStreamStart = false;
+    let completed = false;
 
     while (Date.now() < deadline) {
       const batch = await this.pollMessages(conversationId);
@@ -109,24 +110,25 @@ class SpacebotWebhookClient {
       }
 
       if (sawStreamEnd) {
+        completed = true;
         break;
       }
 
       if (!sawStreamStart && sawPlainText) {
+        completed = true;
         break;
       }
 
       await sleep(this.pollIntervalMs);
     }
 
-    if (!sawAnyResponse) {
-      throw new Error(
-        `Timed out waiting for Spacebot response (${this.maxWaitMs}ms)`,
-      );
-    }
-
     const text = textParts.join("").trim();
-    return { text, rawMessages };
+    return {
+      text,
+      rawMessages,
+      timedOut: !completed,
+      receivedMessages: sawAnyResponse,
+    };
   }
 }
 

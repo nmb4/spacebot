@@ -71,7 +71,7 @@ test("collectReply accepts non-stream text response", async () => {
   assert.equal(result.text, "Done.");
 });
 
-test("collectReply throws when response never arrives", async () => {
+test("collectReply returns timeout metadata when response never arrives", async () => {
   const fetchImpl = async (url) => {
     if (url.endsWith("/send")) {
       return new Response("", { status: 202 });
@@ -86,8 +86,8 @@ test("collectReply throws when response never arrives", async () => {
     fetchImpl,
   });
 
-  await assert.rejects(
-    () => client.collectReply("echo_show:test"),
-    /Timed out waiting for Spacebot response/,
-  );
+  const result = await client.collectReply("echo_show:test");
+  assert.equal(result.text, "");
+  assert.equal(result.receivedMessages, false);
+  assert.equal(result.timedOut, true);
 });
