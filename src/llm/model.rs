@@ -541,8 +541,11 @@ impl SpacebotModel {
             .llm_manager
             .http_client()
             .post(&chat_completions_url)
-            .header("authorization", format!("Bearer {api_key}"))
             .header("content-type", "application/json");
+
+        if !api_key.is_empty() {
+            request_builder = request_builder.header("authorization", format!("Bearer {api_key}"));
+        }
 
         // Kimi endpoints require a specific user-agent header.
         if chat_completions_url.contains("kimi.com") || chat_completions_url.contains("moonshot.ai")
@@ -625,12 +628,16 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self
+        let mut request_builder = self
             .llm_manager
             .http_client()
             .post(&responses_url)
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if !api_key.is_empty() {
+            request_builder = request_builder.header("authorization", format!("Bearer {api_key}"));
+        }
+
+        let response = request_builder
             .json(&body)
             .send()
             .await

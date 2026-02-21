@@ -102,7 +102,7 @@ const PROVIDERS = [
 		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
 		placeholder: "...",
 		envVar: "ZAI_CODING_PLAN_API_KEY",
-		defaultModel: "glm-5",
+		defaultModel: "zai-coding-plan/glm-5",
 	},
 	{
 		id: "zhipu",
@@ -201,12 +201,20 @@ const PROVIDERS = [
 		defaultModel: "moonshot/kimi-k2.5",
 	},
 	{
+		id: "kimi-coding",
+		name: "Kimi Coding Plan",
+		description: "Kimi coding endpoint (kimi-for-coding)",
+		placeholder: "kimi_...",
+		envVar: "KIMI_API_KEY",
+		defaultModel: "kimi-coding/kimi-for-coding",
+	},
+	{
 		id: "ollama",
 		name: "Ollama",
-		description: "Local or remote Ollama API endpoint",
-		placeholder: "http://localhost:11434",
-		envVar: "OLLAMA_BASE_URL",
-		defaultModel: "ollama/llama3.2",
+		description: "Local endpoint URL or cloud API key",
+		placeholder: "http://localhost:11434 or ollama_...",
+		envVar: "OLLAMA_BASE_URL / OLLAMA_API_KEY",
+		defaultModel: "ollama/gpt-oss:120b",
 	},
 ] as const;
 

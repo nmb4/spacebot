@@ -115,6 +115,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		minimax: Minimax,
 		"minimax-cn": Minimax,
 		moonshot: Kimi, // Kimi is Moonshot AI's product brand
+		"kimi-coding": Kimi,
 	};
 
 	const IconComponent = iconMap[provider.toLowerCase()];

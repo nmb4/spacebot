@@ -190,6 +190,22 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
+        "ollama" => {
+            let channel: String = "ollama/gpt-oss:120b".into();
+            let worker: String = "ollama/gpt-oss:20b".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
         "zhipu" => {
             let channel: String = "zhipu/glm-4-plus".into();
             let worker: String = "zhipu/glm-4-flash".into();
@@ -341,6 +357,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         "minimax" => RoutingConfig::for_model("minimax/MiniMax-M1-80k".into()),
         "minimax-cn" => RoutingConfig::for_model("minimax-cn/MiniMax-M2.5".into()),
         "moonshot" => RoutingConfig::for_model("moonshot/kimi-k2.5".into()),
+        "kimi-coding" => RoutingConfig::for_model("kimi-coding/kimi-for-coding".into()),
         "zai-coding-plan" => RoutingConfig::for_model("zai-coding-plan/glm-5".into()),
         // Unknown — use the standard defaults
         _ => RoutingConfig::default(),
@@ -352,6 +369,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
     match provider {
         "openrouter" => "openrouter/",
         "openai" => "openai/",
+        "ollama" => "ollama/",
         "anthropic" => "anthropic/",
         "zhipu" => "zhipu/",
         "groq" => "groq/",
@@ -366,6 +384,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "minimax" => "minimax/",
         "minimax-cn" => "minimax-cn/",
         "moonshot" => "moonshot/",
+        "kimi-coding" => "kimi-coding/",
         "zai-coding-plan" => "zai-coding-plan/",
         _ => "",
     }

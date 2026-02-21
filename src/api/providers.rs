@@ -28,6 +28,7 @@ pub(super) struct ProviderStatus {
     minimax: bool,
     minimax_cn: bool,
     moonshot: bool,
+    kimi_coding: bool,
     zai_coding_plan: bool,
 }
 
@@ -85,9 +86,26 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "minimax" => Some("minimax_key"),
         "minimax-cn" => Some("minimax_cn_key"),
         "moonshot" => Some("moonshot_key"),
+        "kimi-coding" => Some("kimi_coding_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
         _ => None,
     }
+}
+
+fn looks_like_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn normalize_ollama_base_url(input: &str) -> String {
+    let mut base_url = input.trim().trim_end_matches('/').to_string();
+
+    if base_url.ends_with("/api") {
+        base_url.truncate(base_url.len() - "/api".len());
+    } else if base_url.ends_with("/v1") {
+        base_url.truncate(base_url.len() - "/v1".len());
+    }
+
+    base_url
 }
 
 fn model_matches_provider(provider: &str, model: &str) -> bool {
@@ -96,6 +114,17 @@ fn model_matches_provider(provider: &str, model: &str) -> bool {
 
 fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::LlmConfig {
     use crate::config::{ApiType, ProviderConfig};
+
+    let ollama_uses_url = provider == "ollama" && looks_like_url(credential);
+    let ollama_base_url = if provider == "ollama" {
+        if ollama_uses_url {
+            normalize_ollama_base_url(credential)
+        } else {
+            "https://ollama.com".to_string()
+        }
+    } else {
+        String::new()
+    };
 
     let mut providers = HashMap::new();
     let provider_config = match provider {
@@ -195,6 +224,22 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             api_key: credential.to_string(),
             name: None,
         }),
+        "kimi-coding" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.kimi.com/coding".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "ollama" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: ollama_base_url.clone(),
+            api_key: if ollama_uses_url {
+                String::new()
+            } else {
+                credential.to_string()
+            },
+            name: None,
+        }),
         "zai-coding-plan" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
             base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
@@ -220,13 +265,14 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         xai_key: (provider == "xai").then(|| credential.to_string()),
         mistral_key: (provider == "mistral").then(|| credential.to_string()),
         gemini_key: (provider == "gemini").then(|| credential.to_string()),
-        ollama_key: None,
-        ollama_base_url: (provider == "ollama").then(|| credential.to_string()),
+        ollama_key: (provider == "ollama" && !ollama_uses_url).then(|| credential.to_string()),
+        ollama_base_url: (provider == "ollama").then_some(ollama_base_url),
         opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
         nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
         minimax_key: (provider == "minimax").then(|| credential.to_string()),
         minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
+        kimi_coding_key: (provider == "kimi-coding").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
         providers,
     }
@@ -255,6 +301,7 @@ pub(super) async fn get_providers(
         minimax,
         minimax_cn,
         moonshot,
+        kimi_coding,
         zai_coding_plan,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
@@ -296,6 +343,7 @@ pub(super) async fn get_providers(
             has_value("minimax_key", "MINIMAX_API_KEY"),
             has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
+            has_value("kimi_coding_key", "KIMI_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
         )
     } else {
@@ -317,6 +365,7 @@ pub(super) async fn get_providers(
             std::env::var("MINIMAX_API_KEY").is_ok(),
             std::env::var("MINIMAX_CN_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
+            std::env::var("KIMI_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
         )
     };
@@ -339,6 +388,7 @@ pub(super) async fn get_providers(
         minimax,
         minimax_cn,
         moonshot,
+        kimi_coding,
         zai_coding_plan,
     };
     let has_any = providers.anthropic
@@ -358,6 +408,7 @@ pub(super) async fn get_providers(
         || providers.minimax
         || providers.minimax_cn
         || providers.moonshot
+        || providers.kimi_coding
         || providers.zai_coding_plan;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
@@ -367,17 +418,18 @@ pub(super) async fn update_provider(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<ProviderUpdateRequest>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
-    let Some(key_name) = provider_toml_key(&request.provider) else {
+    if provider_toml_key(&request.provider).is_none() {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
             message: format!("Unknown provider: {}", request.provider),
         }));
-    };
+    }
 
-    if request.api_key.trim().is_empty() {
+    let credential = request.api_key.trim();
+    if credential.is_empty() {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
-            message: "API key cannot be empty".into(),
+            message: "Credential cannot be empty".into(),
         }));
     }
 
@@ -416,7 +468,26 @@ pub(super) async fn update_provider(
         doc["llm"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
 
-    doc["llm"][key_name] = toml_edit::value(request.api_key);
+    if request.provider == "ollama" {
+        if let Some(llm_table) = doc.get_mut("llm").and_then(|item| item.as_table_mut()) {
+            if looks_like_url(credential) {
+                llm_table.remove("ollama_key");
+                llm_table["ollama_base_url"] =
+                    toml_edit::value(normalize_ollama_base_url(credential));
+            } else {
+                llm_table["ollama_key"] = toml_edit::value(credential);
+                llm_table["ollama_base_url"] = toml_edit::value("https://ollama.com");
+            }
+        }
+    } else {
+        let Some(key_name) = provider_toml_key(&request.provider) else {
+            return Ok(Json(ProviderUpdateResponse {
+                success: false,
+                message: format!("Unknown provider: {}", request.provider),
+            }));
+        };
+        doc["llm"][key_name] = toml_edit::value(credential);
+    }
 
     if doc.get("defaults").is_none() {
         doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -590,7 +661,12 @@ pub(super) async fn delete_provider(
     if let Some(llm) = doc.get_mut("llm")
         && let Some(table) = llm.as_table_mut()
     {
-        table.remove(key_name);
+        if provider == "ollama" {
+            table.remove("ollama_base_url");
+            table.remove("ollama_key");
+        } else {
+            table.remove(key_name);
+        }
     }
 
     tokio::fs::write(&config_path, doc.to_string())

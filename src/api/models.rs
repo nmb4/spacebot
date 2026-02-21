@@ -254,6 +254,53 @@ fn extra_models() -> Vec<ModelInfo> {
             reasoning: false,
             input_audio: false,
         },
+        // Ollama
+        ModelInfo {
+            id: "ollama/gpt-oss:120b".into(),
+            name: "GPT OSS 120B".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "ollama/gpt-oss:20b".into(),
+            name: "GPT OSS 20B".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "ollama/gemma3".into(),
+            name: "Gemma 3".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        // Kimi Coding Plan
+        ModelInfo {
+            id: "kimi-coding/kimi-for-coding".into(),
+            name: "Kimi For Coding".into(),
+            provider: "kimi-coding".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "kimi-coding/kimi-k2.5".into(),
+            name: "Kimi K2.5".into(),
+            provider: "kimi-coding".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
     ]
 }
 
@@ -410,6 +457,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("gemini_key", "GEMINI_API_KEY") {
         providers.push("gemini");
     }
+    if has_key("ollama_base_url", "OLLAMA_BASE_URL") || has_key("ollama_key", "OLLAMA_API_KEY") {
+        providers.push("ollama");
+    }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
     }
@@ -421,6 +471,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("moonshot_key", "MOONSHOT_API_KEY") {
         providers.push("moonshot");
+    }
+    if has_key("kimi_coding_key", "KIMI_API_KEY") {
+        providers.push("kimi-coding");
     }
     if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
         providers.push("zai-coding-plan");

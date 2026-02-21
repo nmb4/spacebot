@@ -17,6 +17,10 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
         tracing::info!("OpenAI provider configured");
     }
 
+    if config.openrouter_key.is_some() {
+        tracing::info!("OpenRouter provider configured");
+    }
+
     if config.ollama_base_url.is_some() || config.ollama_key.is_some() {
         tracing::info!("Ollama provider configured");
     }
@@ -31,6 +35,10 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
 
     if config.moonshot_key.is_some() {
         tracing::info!("Moonshot AI provider configured");
+    }
+
+    if config.kimi_coding_key.is_some() {
+        tracing::info!("Kimi Coding provider configured");
     }
 
     if config.nvidia_key.is_some() {

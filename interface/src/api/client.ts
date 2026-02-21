@@ -674,6 +674,7 @@ export interface ProviderStatus {
 	nvidia: boolean;
 	minimax: boolean;
 	moonshot: boolean;
+	kimi_coding: boolean;
 	zai_coding_plan: boolean;
 }
 
