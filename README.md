@@ -179,6 +179,18 @@ worker = "ollama/gemma3"
 coding = "ollama/qwen3"
 ```
 
+**Ollama Cloud example** — use hosted models with an API key:
+
+```toml
+[llm]
+ollama_key = "env:OLLAMA_API_KEY"
+ollama_base_url = "https://ollama.com"
+
+[defaults.routing]
+channel = "ollama/gpt-oss:120b"
+worker = "ollama/gpt-oss:20b"
+```
+
 **Custom provider example** — add any OpenAI-compatible or Anthropic-compatible endpoint:
 
 ```toml
@@ -191,7 +203,7 @@ api_key = "env:MY_PROVIDER_KEY"
 channel = "my-provider/my-model"
 ```
 
-Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
+Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, **Kimi Coding Plan**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, `kimi_coding_key`, or `zai_coding_plan_key` in `[llm]`.
 
 ### Skills
 

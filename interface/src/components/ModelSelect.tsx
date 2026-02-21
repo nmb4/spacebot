@@ -24,7 +24,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   together: "Together AI",
   fireworks: "Fireworks AI",
   zhipu: "Z.ai (GLM)",
+  "zai-coding-plan": "Z.AI Coding Plan",
+  moonshot: "Moonshot AI",
+  "kimi-coding": "Kimi Coding Plan",
+  minimax: "MiniMax",
   ollama: "Ollama",
+  nvidia: "NVIDIA NIM",
   "opencode-zen": "OpenCode Zen",
 };
 
@@ -136,6 +141,11 @@ export function ModelSelect({
     "together",
     "fireworks",
     "zhipu",
+    "zai-coding-plan",
+    "moonshot",
+    "kimi-coding",
+    "minimax",
+    "nvidia",
     "opencode-zen",
   ];
   const sortedProviders = Object.keys(grouped).sort(

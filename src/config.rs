@@ -153,6 +153,7 @@ pub struct LlmConfig {
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub moonshot_key: Option<String>,
+    pub kimi_coding_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -177,6 +178,7 @@ impl LlmConfig {
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
             || self.moonshot_key.is_some()
+            || self.kimi_coding_key.is_some()
             || self.zai_coding_plan_key.is_some()
             || !self.providers.is_empty()
     }
@@ -188,11 +190,25 @@ const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
+const KIMI_CODING_PROVIDER_BASE_URL: &str = "https://api.kimi.com/coding";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
-pub(crate) const GEMINI_PROVIDER_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai";
+
+fn normalize_ollama_base_url(input: &str) -> String {
+    let mut base_url = input.trim().trim_end_matches('/').to_string();
+
+    if base_url.ends_with("/api") {
+        base_url.truncate(base_url.len() - "/api".len());
+    } else if base_url.ends_with("/v1") {
+        base_url.truncate(base_url.len() - "/v1".len());
+    }
+
+    base_url
+}
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Debug, Clone)]
@@ -1195,6 +1211,7 @@ struct TomlLlmConfigFields {
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
+    kimi_coding_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
@@ -1222,6 +1239,7 @@ struct TomlLlmConfig {
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
+    kimi_coding_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
@@ -1274,6 +1292,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
             moonshot_key: fields.moonshot_key,
+            kimi_coding_key: fields.kimi_coding_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
             providers: fields.providers,
         })
@@ -1740,6 +1759,7 @@ impl Config {
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
             || std::env::var("MINIMAX_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
+            || std::env::var("KIMI_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
 
         // If we have any legacy keys, no onboarding needed
@@ -1812,6 +1832,7 @@ impl Config {
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
+            kimi_coding_key: std::env::var("KIMI_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
             providers: HashMap::new(),
         };
@@ -1901,6 +1922,33 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
+                    name: None,
+                });
+        }
+
+        if let Some(kimi_coding_key) = llm.kimi_coding_key.clone() {
+            llm.providers
+                .entry("kimi-coding".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: KIMI_CODING_PROVIDER_BASE_URL.to_string(),
+                    api_key: kimi_coding_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_key.is_some() || llm.ollama_base_url.is_some() {
+            let base_url = normalize_ollama_base_url(
+                llm.ollama_base_url
+                    .as_deref()
+                    .unwrap_or("https://ollama.com"),
+            );
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url,
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                 });
         }
@@ -2128,6 +2176,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MOONSHOT_API_KEY").ok()),
+            kimi_coding_key: toml
+                .llm
+                .kimi_coding_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("KIMI_API_KEY").ok()),
             zai_coding_plan_key: toml
                 .llm
                 .zai_coding_plan_key
@@ -2237,6 +2291,33 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
+                    name: None,
+                });
+        }
+
+        if let Some(kimi_coding_key) = llm.kimi_coding_key.clone() {
+            llm.providers
+                .entry("kimi-coding".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: KIMI_CODING_PROVIDER_BASE_URL.to_string(),
+                    api_key: kimi_coding_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_key.is_some() || llm.ollama_base_url.is_some() {
+            let base_url = normalize_ollama_base_url(
+                llm.ollama_base_url
+                    .as_deref()
+                    .unwrap_or("https://ollama.com"),
+            );
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url,
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                 });
         }
@@ -3335,10 +3416,12 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "DeepSeek",
         "xAI (Grok)",
         "Mistral AI",
+        "Google Gemini",
         "Ollama",
         "OpenCode Zen",
         "MiniMax",
         "Moonshot AI (Kimi)",
+        "Kimi Coding Plan",
         "Z.AI Coding Plan",
     ];
     let provider_idx = Select::new()
@@ -3382,7 +3465,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         None
     };
 
-    let (provider_input_name, toml_key, provider_id) = match provider_idx {
+    let (provider_input_name, mut toml_key, provider_id) = match provider_idx {
         0 => ("Anthropic API key", "anthropic_key", "anthropic"),
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
         2 => ("OpenAI API key", "openai_key", "openai"),
@@ -3394,25 +3477,57 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         8 => ("xAI API key", "xai_key", "xai"),
         9 => ("Mistral API key", "mistral_key", "mistral"),
         10 => ("Google Gemini API key", "gemini_key", "gemini"),
-        11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
+        11 => ("Ollama connection", "ollama_base_url", "ollama"),
         12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
         13 => ("MiniMax API key", "minimax_key", "minimax"),
         14 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        15 => (
+        15 => ("Kimi Coding Plan API key", "kimi_coding_key", "kimi-coding"),
+        16 => (
             "Z.AI Coding Plan API key",
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
         _ => unreachable!(),
     };
-    let is_secret = provider_id != "ollama";
 
     // 2. Get provider credential/endpoint (skip if OAuth was used)
     let provider_value = if anthropic_oauth.is_some() {
         // OAuth tokens are stored in anthropic_oauth.json, not in config.toml.
         // Use a placeholder so the config still has an [llm] section.
         String::new()
-    } else if is_secret {
+    } else if provider_id == "ollama" {
+        let mode = Select::new()
+            .with_prompt("How do you want to connect to Ollama?")
+            .items(&[
+                "Local/remote endpoint URL",
+                "Cloud API key (uses https://ollama.com)",
+            ])
+            .default(0)
+            .interact()?;
+
+        if mode == 0 {
+            toml_key = "ollama_base_url";
+            let base_url: String = Input::new()
+                .with_prompt("Enter your Ollama base URL")
+                .default("http://localhost:11434".to_string())
+                .interact_text()?;
+            let base_url = normalize_ollama_base_url(&base_url);
+            if base_url.is_empty() {
+                anyhow::bail!("Ollama base URL cannot be empty");
+            }
+            base_url
+        } else {
+            toml_key = "ollama_key";
+            let api_key: String = Password::new()
+                .with_prompt("Enter your Ollama Cloud API key")
+                .interact()?;
+            let api_key = api_key.trim().to_string();
+            if api_key.is_empty() {
+                anyhow::bail!("Ollama API key cannot be empty");
+            }
+            api_key
+        }
+    } else {
         let api_key: String = Password::new()
             .with_prompt(format!("Enter your {provider_input_name}"))
             .interact()?;
@@ -3422,17 +3537,6 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             anyhow::bail!("API key cannot be empty");
         }
         api_key
-    } else {
-        let base_url: String = Input::new()
-            .with_prompt(format!("Enter your {provider_input_name}"))
-            .default("http://localhost:11434".to_string())
-            .interact_text()?;
-
-        let base_url = base_url.trim().to_string();
-        if base_url.is_empty() {
-            anyhow::bail!("Ollama base URL cannot be empty");
-        }
-        base_url
     };
 
     // 3. Agent name
@@ -3615,7 +3719,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 20] = [
+            const KEYS: [&str; 21] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "ANTHROPIC_API_KEY",
@@ -3635,6 +3739,7 @@ mod tests {
                 "OPENCODE_ZEN_API_KEY",
                 "MINIMAX_API_KEY",
                 "MOONSHOT_API_KEY",
+                "KIMI_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
             ];
 
