@@ -53,18 +53,39 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AuthCommand {
-    /// Log in to Anthropic via OAuth (opens browser)
+    /// Log in via provider OAuth (opens browser)
     Login {
+        /// Provider to authenticate
+        #[arg(long, value_enum, default_value_t = AuthProvider::Anthropic)]
+        provider: AuthProvider,
         /// Use API console instead of Claude Pro/Max
         #[arg(long)]
         console: bool,
     },
     /// Show current auth status
-    Status,
+    Status {
+        /// Provider to inspect
+        #[arg(long, value_enum, default_value_t = AuthProvider::Anthropic)]
+        provider: AuthProvider,
+    },
     /// Log out (remove stored credentials)
-    Logout,
+    Logout {
+        /// Provider to log out
+        #[arg(long, value_enum, default_value_t = AuthProvider::Anthropic)]
+        provider: AuthProvider,
+    },
     /// Refresh the access token
-    Refresh,
+    Refresh {
+        /// Provider to refresh
+        #[arg(long, value_enum, default_value_t = AuthProvider::Anthropic)]
+        provider: AuthProvider,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthProvider {
+    Anthropic,
+    Antigravity,
 }
 
 #[derive(Subcommand)]
@@ -332,41 +353,101 @@ fn cmd_auth(config_path: Option<std::path::PathBuf>, auth_cmd: AuthCommand) -> a
 
     runtime.block_on(async {
         match auth_cmd {
-            AuthCommand::Login { console } => {
-                let mode = if console {
-                    spacebot::auth::AuthMode::Console
-                } else {
-                    spacebot::auth::AuthMode::Max
-                };
-                spacebot::auth::login_interactive(&instance_dir, mode).await?;
-                Ok(())
-            }
-            AuthCommand::Status => {
-                match spacebot::auth::load_credentials(&instance_dir)? {
-                    Some(creds) => {
-                        let expires_in = creds.expires_at - chrono::Utc::now().timestamp_millis();
-                        let expires_min = expires_in / 60_000;
-                        if creds.is_expired() {
-                            eprintln!("Anthropic OAuth: expired ({}m ago)", -expires_min);
-                        } else {
-                            eprintln!("Anthropic OAuth: valid (expires in {}m)", expires_min);
-                        }
-                        eprintln!("  access token: {}...", &creds.access_token[..20]);
-                        eprintln!("  refresh token: {}...", &creds.refresh_token[..20]);
-                        eprintln!(
-                            "  credentials file: {}",
-                            spacebot::auth::credentials_path(&instance_dir).display()
+            AuthCommand::Login { provider, console } => match provider {
+                AuthProvider::Anthropic => {
+                    let mode = if console {
+                        spacebot::auth::AuthMode::Console
+                    } else {
+                        spacebot::auth::AuthMode::Max
+                    };
+                    spacebot::auth::login_interactive(&instance_dir, mode).await?;
+                    Ok(())
+                }
+                AuthProvider::Antigravity => {
+                    if console {
+                        anyhow::bail!(
+                            "`--console` is only valid for Anthropic (`--provider anthropic`)."
                         );
                     }
-                    None => {
-                        eprintln!("No OAuth credentials found.");
-                        eprintln!("Run `spacebot auth login` to authenticate.");
+                    spacebot::auth::antigravity_login_interactive(&instance_dir).await?;
+                    Ok(())
+                }
+            },
+            AuthCommand::Status { provider } => {
+                match provider {
+                    AuthProvider::Anthropic => match spacebot::auth::load_credentials(&instance_dir)?
+                    {
+                        Some(creds) => {
+                            let expires_in = creds.expires_at - chrono::Utc::now().timestamp_millis();
+                            let expires_min = expires_in / 60_000;
+                            if creds.is_expired() {
+                                eprintln!("Anthropic OAuth: expired ({}m ago)", -expires_min);
+                            } else {
+                                eprintln!("Anthropic OAuth: valid (expires in {}m)", expires_min);
+                            }
+                            let access_prefix = &creds.access_token[..creds.access_token.len().min(20)];
+                            let refresh_prefix =
+                                &creds.refresh_token[..creds.refresh_token.len().min(20)];
+                            eprintln!("  access token: {}...", access_prefix);
+                            eprintln!("  refresh token: {}...", refresh_prefix);
+                            eprintln!(
+                                "  credentials file: {}",
+                                spacebot::auth::credentials_path(&instance_dir).display()
+                            );
+                        }
+                        None => {
+                            eprintln!("No Anthropic OAuth credentials found.");
+                            eprintln!("Run `spacebot auth login --provider anthropic` to authenticate.");
+                        }
+                    },
+                    AuthProvider::Antigravity => {
+                        match spacebot::auth::load_antigravity_credentials(&instance_dir)? {
+                            Some(creds) => {
+                                let expires_in =
+                                    creds.expires_at - chrono::Utc::now().timestamp_millis();
+                                let expires_min = expires_in / 60_000;
+                                if creds.is_expired() {
+                                    eprintln!("Antigravity OAuth: expired ({}m ago)", -expires_min);
+                                } else {
+                                    eprintln!(
+                                        "Antigravity OAuth: valid (expires in {}m)",
+                                        expires_min
+                                    );
+                                }
+                                let access_prefix =
+                                    &creds.access_token[..creds.access_token.len().min(20)];
+                                let refresh_prefix = creds
+                                    .refresh_token
+                                    .as_deref()
+                                    .map(|token| &token[..token.len().min(20)])
+                                    .unwrap_or("(none)");
+                                eprintln!("  access token: {}...", access_prefix);
+                                eprintln!("  refresh token: {}...", refresh_prefix);
+                                eprintln!("  project_id: {}", creds.project_id);
+                                eprintln!(
+                                    "  credentials file: {}",
+                                    spacebot::auth::antigravity_credentials_path(&instance_dir)
+                                        .display()
+                                );
+                            }
+                            None => {
+                                eprintln!("No Antigravity OAuth credentials found.");
+                                eprintln!(
+                                    "Run `spacebot auth login --provider antigravity` to authenticate."
+                                );
+                            }
+                        }
                     }
                 }
                 Ok(())
             }
-            AuthCommand::Logout => {
-                let path = spacebot::auth::credentials_path(&instance_dir);
+            AuthCommand::Logout { provider } => {
+                let path = match provider {
+                    AuthProvider::Anthropic => spacebot::auth::credentials_path(&instance_dir),
+                    AuthProvider::Antigravity => {
+                        spacebot::auth::antigravity_credentials_path(&instance_dir)
+                    }
+                };
                 if path.exists() {
                     std::fs::remove_file(&path)?;
                     eprintln!("Credentials removed.");
@@ -375,15 +456,29 @@ fn cmd_auth(config_path: Option<std::path::PathBuf>, auth_cmd: AuthCommand) -> a
                 }
                 Ok(())
             }
-            AuthCommand::Refresh => {
-                let creds = spacebot::auth::load_credentials(&instance_dir)?
-                    .context("no credentials found — run `spacebot auth login` first")?;
-                eprintln!("Refreshing access token...");
-                let new_creds = creds.refresh().await.context("refresh failed")?;
-                spacebot::auth::save_credentials(&instance_dir, &new_creds)?;
-                let expires_min =
-                    (new_creds.expires_at - chrono::Utc::now().timestamp_millis()) / 60_000;
-                eprintln!("Token refreshed (expires in {}m)", expires_min);
+            AuthCommand::Refresh { provider } => {
+                match provider {
+                    AuthProvider::Anthropic => {
+                        let creds = spacebot::auth::load_credentials(&instance_dir)?
+                            .context("no credentials found — run `spacebot auth login` first")?;
+                        eprintln!("Refreshing Anthropic access token...");
+                        let new_creds = creds.refresh().await.context("refresh failed")?;
+                        spacebot::auth::save_credentials(&instance_dir, &new_creds)?;
+                        let expires_min =
+                            (new_creds.expires_at - chrono::Utc::now().timestamp_millis()) / 60_000;
+                        eprintln!("Token refreshed (expires in {}m)", expires_min);
+                    }
+                    AuthProvider::Antigravity => {
+                        let creds = spacebot::auth::load_antigravity_credentials(&instance_dir)?
+                            .context("no credentials found — run `spacebot auth login --provider antigravity` first")?;
+                        eprintln!("Refreshing Antigravity access token...");
+                        let new_creds = creds.refresh().await.context("refresh failed")?;
+                        spacebot::auth::save_antigravity_credentials(&instance_dir, &new_creds)?;
+                        let expires_min =
+                            (new_creds.expires_at - chrono::Utc::now().timestamp_millis()) / 60_000;
+                        eprintln!("Token refreshed (expires in {}m)", expires_min);
+                    }
+                }
                 Ok(())
             }
         }
@@ -654,8 +749,9 @@ async fn run(
     };
 
     // Check if we have provider configuration (API keys or OAuth credentials)
-    let has_providers =
-        config.llm.has_any_key() || spacebot::auth::credentials_path(&config.instance_dir).exists();
+    let has_providers = config.llm.has_any_key()
+        || spacebot::auth::credentials_path(&config.instance_dir).exists()
+        || spacebot::auth::antigravity_credentials_path(&config.instance_dir).exists();
 
     if !has_providers {
         tracing::info!("No LLM providers configured. Starting in setup mode.");

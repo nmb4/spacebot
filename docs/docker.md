@@ -74,6 +74,8 @@ Available environment variables:
 | `ANTHROPIC_API_KEY`      | Anthropic API key      |
 | `OPENAI_API_KEY`         | OpenAI API key         |
 | `OPENROUTER_API_KEY`     | OpenRouter API key     |
+| `ANTIGRAVITY_API_KEY`    | Antigravity access token |
+| `ANTIGRAVITY_PROJECT_ID` | Antigravity Google Cloud project id |
 | `DISCORD_BOT_TOKEN`      | Discord bot token      |
 | `SLACK_BOT_TOKEN`        | Slack bot token        |
 | `SLACK_APP_TOKEN`        | Slack app token        |

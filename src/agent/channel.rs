@@ -1988,7 +1988,7 @@ async fn transcribe_audio_attachment(
         }
     };
 
-    if provider.api_type == ApiType::Anthropic {
+    if provider.api_type == ApiType::Anthropic || provider.api_type == ApiType::Antigravity {
         return UserContent::text(format!(
             "[Audio transcription failed for {}: provider '{}' does not support input_audio on this endpoint]",
             attachment.filename, provider_id

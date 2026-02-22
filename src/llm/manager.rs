@@ -8,7 +8,7 @@
 //! `reload_config()` when config.toml changes, and all subsequent
 //! `get_api_key()` calls read the new values lock-free.
 
-use crate::auth::OAuthCredentials;
+use crate::auth::{AntigravityCredentials, OAuthCredentials};
 use crate::config::{ApiType, LlmConfig, ProviderConfig};
 use crate::error::{LlmError, Result};
 
@@ -30,6 +30,8 @@ pub struct LlmManager {
     instance_dir: Option<PathBuf>,
     /// Cached OAuth credentials (refreshed lazily).
     oauth_credentials: RwLock<Option<OAuthCredentials>>,
+    /// Cached Antigravity OAuth credentials (refreshed lazily).
+    antigravity_credentials: RwLock<Option<AntigravityCredentials>>,
 }
 
 impl LlmManager {
@@ -46,6 +48,7 @@ impl LlmManager {
             rate_limited: Arc::new(RwLock::new(HashMap::new())),
             instance_dir: None,
             oauth_credentials: RwLock::new(None),
+            antigravity_credentials: RwLock::new(None),
         })
     }
 
@@ -54,6 +57,10 @@ impl LlmManager {
         if let Ok(Some(creds)) = crate::auth::load_credentials(&instance_dir) {
             tracing::info!("loaded OAuth credentials from auth.json");
             *self.oauth_credentials.write().await = Some(creds);
+        }
+        if let Ok(Some(creds)) = crate::auth::load_antigravity_credentials(&instance_dir) {
+            tracing::info!("loaded Antigravity OAuth credentials from antigravity_oauth.json");
+            *self.antigravity_credentials.write().await = Some(creds);
         }
         // Store instance_dir — we can't set it on &self since it's not behind RwLock,
         // but we only need it for save_credentials which we handle inline.
@@ -77,6 +84,18 @@ impl LlmManager {
                 None
             }
         };
+        let antigravity_credentials = match crate::auth::load_antigravity_credentials(&instance_dir)
+        {
+            Ok(Some(creds)) => {
+                tracing::info!("loaded Antigravity OAuth credentials from antigravity_oauth.json");
+                Some(creds)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load Antigravity OAuth credentials");
+                None
+            }
+        };
 
         Ok(Self {
             config: ArcSwap::from_pointee(config),
@@ -84,6 +103,7 @@ impl LlmManager {
             rate_limited: Arc::new(RwLock::new(HashMap::new())),
             instance_dir: Some(instance_dir),
             oauth_credentials: RwLock::new(oauth_credentials),
+            antigravity_credentials: RwLock::new(antigravity_credentials),
         })
     }
 
@@ -166,6 +186,64 @@ impl LlmManager {
                 name: None,
             }),
             (None, None) => Err(LlmError::UnknownProvider("anthropic".to_string()).into()),
+        }
+    }
+
+    /// Get the appropriate Antigravity OAuth credentials, refreshing if needed.
+    pub async fn get_antigravity_credentials(&self) -> Result<Option<AntigravityCredentials>> {
+        let mut creds_guard = self.antigravity_credentials.write().await;
+        let Some(creds) = creds_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        if !creds.is_expired() {
+            return Ok(Some(creds.clone()));
+        }
+
+        tracing::info!("Antigravity access token expired, refreshing...");
+        match creds.refresh().await {
+            Ok(new_creds) => {
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) =
+                        crate::auth::save_antigravity_credentials(instance_dir, &new_creds)
+                {
+                    tracing::warn!(
+                        %error,
+                        "failed to persist refreshed Antigravity OAuth credentials"
+                    );
+                }
+                *creds_guard = Some(new_creds.clone());
+                tracing::info!("Antigravity OAuth token refreshed successfully");
+                Ok(Some(new_creds))
+            }
+            Err(error) => {
+                tracing::error!(%error, "Antigravity OAuth token refresh failed");
+                Ok(Some(creds.clone()))
+            }
+        }
+    }
+
+    /// Resolve the Antigravity provider config, preferring OAuth credentials.
+    pub async fn get_antigravity_provider(&self) -> Result<ProviderConfig> {
+        let oauth = self.get_antigravity_credentials().await?;
+        let static_provider = self.get_provider("antigravity").ok();
+
+        match (static_provider, oauth) {
+            (Some(mut provider), Some(credentials)) => {
+                provider.api_key = credentials.access_token;
+                if provider.name.is_none() {
+                    provider.name = Some(credentials.project_id);
+                }
+                Ok(provider)
+            }
+            (Some(provider), None) => Ok(provider),
+            (None, Some(credentials)) => Ok(ProviderConfig {
+                api_type: ApiType::Antigravity,
+                base_url: "https://cloudcode-pa.googleapis.com".to_string(),
+                api_key: credentials.access_token,
+                name: Some(credentials.project_id),
+            }),
+            (None, None) => Err(LlmError::UnknownProvider("antigravity".to_string()).into()),
         }
     }
 

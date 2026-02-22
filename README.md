@@ -191,19 +191,22 @@ channel = "ollama/gpt-oss:120b"
 worker = "ollama/gpt-oss:20b"
 ```
 
-**Custom provider example** — add any OpenAI-compatible or Anthropic-compatible endpoint:
+**Custom provider example** — add any OpenAI-compatible, Anthropic-compatible, Gemini-compatible, or Antigravity endpoint:
 
 ```toml
 [llm.provider.my-provider]
-api_type = "openai_completions"  # or "anthropic"
+api_type = "openai_completions"  # or "anthropic", "gemini", "openai_responses", "antigravity"
 base_url = "https://my-llm-host.example.com"
 api_key = "env:MY_PROVIDER_KEY"
+# For antigravity, set name to your Google Cloud project_id.
+# name = "my-gcp-project"
 
 [defaults.routing]
 channel = "my-provider/my-model"
 ```
 
-Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, **Kimi Coding Plan**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, `kimi_coding_key`, or `zai_coding_plan_key` in `[llm]`.
+Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, **Kimi Coding Plan**, **Z.AI Coding Plan**, and **Antigravity (Cloud Code Assist)** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, `kimi_coding_key`, `zai_coding_plan_key`, or `antigravity_key` in `[llm]`.
+For key-based Antigravity usage (without OAuth), also set `antigravity_project_id`.
 
 ### Skills
 
@@ -392,7 +395,7 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen) — or use `spacebot auth login` for Anthropic OAuth
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen, Antigravity) — or use `spacebot auth login --provider ...` for OAuth providers
 
 ### Build and Run
 
@@ -432,24 +435,29 @@ spacebot start --foreground   # or run in the foreground
 spacebot stop                 # graceful shutdown
 spacebot restart              # stop + start
 spacebot status               # show pid and uptime
-spacebot auth login           # authenticate via Anthropic OAuth
+spacebot auth login --provider anthropic    # authenticate via Anthropic OAuth
+spacebot auth login --provider antigravity  # authenticate via Antigravity OAuth
 ```
 
 The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/content/docs/(getting-started)/quickstart.mdx) for more detail.
 
 ### Authentication
 
-Spacebot supports Anthropic OAuth as an alternative to static API keys. Use your Claude Pro, Max, or API Console subscription directly:
+Spacebot supports OAuth flows for Anthropic and Antigravity as alternatives to static API keys:
 
 ```bash
-spacebot auth login             # OAuth via Claude Pro/Max (opens browser)
-spacebot auth login --console   # OAuth via API Console
-spacebot auth status            # show credential status and expiry
-spacebot auth refresh           # manually refresh the access token
-spacebot auth logout            # remove stored credentials
+spacebot auth login --provider anthropic             # OAuth via Claude Pro/Max (opens browser)
+spacebot auth login --provider anthropic --console   # OAuth via API Console
+spacebot auth login --provider antigravity           # OAuth via Antigravity
+spacebot auth status --provider anthropic
+spacebot auth status --provider antigravity
+spacebot auth refresh --provider anthropic
+spacebot auth refresh --provider antigravity
+spacebot auth logout --provider anthropic
+spacebot auth logout --provider antigravity
 ```
 
-OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently before each API call. When OAuth credentials are present, they take priority over a static `ANTHROPIC_API_KEY`.
+OAuth tokens are stored in `anthropic_oauth.json` and `antigravity_oauth.json` and auto-refresh transparently before each API call. When OAuth credentials are present, they take priority over static provider keys.
 
 ---
 

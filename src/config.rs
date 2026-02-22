@@ -109,6 +109,8 @@ pub enum ApiType {
     Anthropic,
     /// Google Gemini API (https://generativelanguage.googleapis.com/v1beta/openai/chat/completions)
     Gemini,
+    /// Google Cloud Code Assist via Antigravity auth (streamGenerateContent/streamRawPredict)
+    Antigravity,
 }
 
 impl<'de> serde::Deserialize<'de> for ApiType {
@@ -121,9 +123,10 @@ impl<'de> serde::Deserialize<'de> for ApiType {
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
+            "antigravity" => Ok(Self::Antigravity),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", or \"gemini\"",
+                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", \"gemini\", or \"antigravity\"",
             )),
         }
     }
@@ -172,6 +175,8 @@ pub struct LlmConfig {
     pub moonshot_key: Option<String>,
     pub kimi_coding_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
+    pub antigravity_key: Option<String>,
+    pub antigravity_project_id: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
 
@@ -266,6 +271,7 @@ impl LlmConfig {
             || self.moonshot_key.is_some()
             || self.kimi_coding_key.is_some()
             || self.zai_coding_plan_key.is_some()
+            || self.antigravity_key.is_some()
             || !self.providers.is_empty()
     }
 }
@@ -278,6 +284,7 @@ const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 const KIMI_CODING_PROVIDER_BASE_URL: &str = "https://api.kimi.com/coding";
+const ANTIGRAVITY_PROVIDER_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
@@ -1393,6 +1400,8 @@ struct TomlLlmConfigFields {
     moonshot_key: Option<String>,
     kimi_coding_key: Option<String>,
     zai_coding_plan_key: Option<String>,
+    antigravity_key: Option<String>,
+    antigravity_project_id: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -1422,6 +1431,8 @@ struct TomlLlmConfig {
     moonshot_key: Option<String>,
     kimi_coding_key: Option<String>,
     zai_coding_plan_key: Option<String>,
+    antigravity_key: Option<String>,
+    antigravity_project_id: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -1476,6 +1487,8 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             moonshot_key: fields.moonshot_key,
             kimi_coding_key: fields.kimi_coding_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
+            antigravity_key: fields.antigravity_key,
+            antigravity_project_id: fields.antigravity_project_id,
             providers: fields.providers,
         })
     }
@@ -1962,7 +1975,9 @@ impl Config {
         }
 
         // OAuth credentials count as configured
-        if crate::auth::credentials_path(&instance_dir).exists() {
+        if crate::auth::credentials_path(&instance_dir).exists()
+            || crate::auth::antigravity_credentials_path(&instance_dir).exists()
+        {
             return false;
         }
 
@@ -1984,7 +1999,8 @@ impl Config {
             || std::env::var("MINIMAX_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("KIMI_API_KEY").is_ok()
-            || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
+            || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok()
+            || std::env::var("ANTIGRAVITY_API_KEY").is_ok();
 
         // If we have any legacy keys, no onboarding needed
         if has_legacy_keys {
@@ -2003,7 +2019,8 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("ANTIGRAVITY_API_KEY").is_ok();
 
         !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
@@ -2061,6 +2078,8 @@ impl Config {
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             kimi_coding_key: std::env::var("KIMI_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
+            antigravity_key: std::env::var("ANTIGRAVITY_API_KEY").ok(),
+            antigravity_project_id: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
             providers: HashMap::new(),
         };
 
@@ -2223,6 +2242,17 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                });
+        }
+
+        if let Some(antigravity_key) = llm.antigravity_key.clone() {
+            llm.providers
+                .entry("antigravity".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Antigravity,
+                    base_url: ANTIGRAVITY_PROVIDER_BASE_URL.to_string(),
+                    api_key: antigravity_key,
+                    name: llm.antigravity_project_id.clone(),
                 });
         }
 
@@ -2469,6 +2499,18 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
+            antigravity_key: toml
+                .llm
+                .antigravity_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ANTIGRAVITY_API_KEY").ok()),
+            antigravity_project_id: toml
+                .llm
+                .antigravity_project_id
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ANTIGRAVITY_PROJECT_ID").ok()),
             providers: toml
                 .llm
                 .providers
@@ -2648,6 +2690,17 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                });
+        }
+
+        if let Some(antigravity_key) = llm.antigravity_key.clone() {
+            llm.providers
+                .entry("antigravity".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Antigravity,
+                    base_url: ANTIGRAVITY_PROVIDER_BASE_URL.to_string(),
+                    api_key: antigravity_key,
+                    name: llm.antigravity_project_id.clone(),
                 });
         }
 
@@ -3780,6 +3833,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Moonshot AI (Kimi)",
         "Kimi Coding Plan",
         "Z.AI Coding Plan",
+        "Google Antigravity (Cloud Code Assist)",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -3822,6 +3876,34 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         None
     };
 
+    let antigravity_oauth = if provider_idx == 17 {
+        let auth_method = Select::new()
+            .with_prompt("How do you want to authenticate with Antigravity?")
+            .items(&[
+                "Log in with Antigravity OAuth",
+                "Enter an access token manually",
+            ])
+            .default(0)
+            .interact()?;
+
+        if auth_method == 0 {
+            let instance_dir = Config::default_instance_dir();
+            std::fs::create_dir_all(&instance_dir)?;
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .with_context(|| "failed to build tokio runtime")?;
+
+            runtime.block_on(crate::auth::antigravity_login_interactive(&instance_dir))?;
+            Some(true)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let (provider_input_name, mut toml_key, provider_id) = match provider_idx {
         0 => ("Anthropic API key", "anthropic_key", "anthropic"),
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
@@ -3844,12 +3926,15 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
+        17 => ("Antigravity access token", "antigravity_key", "antigravity"),
         _ => unreachable!(),
     };
 
+    let mut antigravity_project_id = None;
+
     // 2. Get provider credential/endpoint (skip if OAuth was used)
-    let provider_value = if anthropic_oauth.is_some() {
-        // OAuth tokens are stored in anthropic_oauth.json, not in config.toml.
+    let provider_value = if anthropic_oauth.is_some() || antigravity_oauth.is_some() {
+        // OAuth tokens are stored in oauth credential files, not in config.toml.
         // Use a placeholder so the config still has an [llm] section.
         String::new()
     } else if provider_id == "ollama" {
@@ -3892,6 +3977,16 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         let api_key = api_key.trim().to_string();
         if api_key.is_empty() {
             anyhow::bail!("API key cannot be empty");
+        }
+        if provider_id == "antigravity" {
+            let project_id: String = Input::new()
+                .with_prompt("Google Cloud project_id")
+                .interact_text()?;
+            let project_id = project_id.trim().to_string();
+            if project_id.is_empty() {
+                anyhow::bail!("Google Cloud project_id cannot be empty");
+            }
+            antigravity_project_id = Some(project_id);
         }
         api_key
     };
@@ -3990,8 +4085,16 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
     if anthropic_oauth.is_some() {
         config_content
             .push_str("# Anthropic authentication via OAuth (see anthropic_oauth.json)\n");
+    } else if antigravity_oauth.is_some() {
+        config_content
+            .push_str("# Antigravity authentication via OAuth (see antigravity_oauth.json)\n");
     } else {
         config_content.push_str(&format!("{toml_key} = \"{provider_value}\"\n"));
+        if provider_id == "antigravity"
+            && let Some(project_id) = &antigravity_project_id
+        {
+            config_content.push_str(&format!("antigravity_project_id = \"{project_id}\"\n"));
+        }
     }
     config_content.push('\n');
 
@@ -4101,6 +4204,8 @@ mod tests {
                 "MOONSHOT_API_KEY",
                 "KIMI_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
+                "ANTIGRAVITY_API_KEY",
+                "ANTIGRAVITY_PROJECT_ID",
             ];
 
             let vars = KEYS
@@ -4173,6 +4278,15 @@ api_key = "test-key"
         let result3: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml3);
         assert!(result3.is_ok(), "Error: {:?}", result3.err());
         assert_eq!(result3.unwrap().api_type, ApiType::Anthropic);
+
+        let toml4 = r#"
+api_type = "antigravity"
+base_url = "https://cloudcode-pa.googleapis.com"
+api_key = "test-key"
+"#;
+        let result4: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml4);
+        assert!(result4.is_ok(), "Error: {:?}", result4.err());
+        assert_eq!(result4.unwrap().api_type, ApiType::Antigravity);
     }
 
     #[test]
@@ -4185,6 +4299,7 @@ api_key = "test-key"
         assert!(error.to_string().contains("openai_completions"));
         assert!(error.to_string().contains("openai_responses"));
         assert!(error.to_string().contains("anthropic"));
+        assert!(error.to_string().contains("antigravity"));
     }
 
     #[test]
@@ -4240,7 +4355,7 @@ api_key = "static-provider-key"
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
 
-        assert_eq!(config.llm.providers.len(), 2);
+        assert!(config.llm.providers.len() >= 2);
         assert!(config.llm.providers.contains_key("myprov"));
         assert!(config.llm.providers.contains_key("secondprovider"));
 

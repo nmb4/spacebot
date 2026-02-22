@@ -32,6 +32,8 @@ deepseek_key = "env:DEEPSEEK_API_KEY"
 xai_key = "env:XAI_API_KEY"
 mistral_key = "env:MISTRAL_API_KEY"
 opencode_zen_key = "env:OPENCODE_ZEN_API_KEY"
+antigravity_key = "env:ANTIGRAVITY_API_KEY"
+antigravity_project_id = "env:ANTIGRAVITY_PROJECT_ID" # required when using antigravity_key without OAuth
 
 # Custom LLM providers (alternative to legacy keys)
 [llm.provider.my_anthropic]
@@ -332,6 +334,8 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `moonshot_key` | string | None | Moonshot API key (or `env:VAR_NAME`) |
 | `kimi_coding_key` | string | None | Kimi Coding Plan API key (or `env:VAR_NAME`) |
 | `zai_coding_plan_key` | string | None | Z.AI Coding Plan API key (or `env:VAR_NAME`) |
+| `antigravity_key` | string | None | Antigravity access token (or `env:VAR_NAME`) |
+| `antigravity_project_id` | string | None | Google Cloud `project_id` for Antigravity key-based auth |
 
 #### Custom Providers
 
@@ -339,7 +343,7 @@ Custom providers allow configuring LLM providers with custom endpoints and API t
 
 ```toml
 [llm.provider.<id>]
-api_type = "anthropic"          # Required - one of: anthropic, openai_completions, openai_responses
+api_type = "anthropic"          # Required - one of: anthropic, gemini, openai_completions, openai_responses, antigravity
 base_url = "https://api..."     # Required - valid URL
 api_key = "env:API_KEY"         # Required - API key (supports env:VAR_NAME format)
 name = "My Provider"            # Optional - friendly name for display
@@ -347,10 +351,10 @@ name = "My Provider"            # Optional - friendly name for display
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_type` | string | Yes | API protocol type. One of: `anthropic` (Anthropic Messages API), `openai_completions` (OpenAI Chat Completions-compatible API), or `openai_responses` (OpenAI Responses API-compatible) |
+| `api_type` | string | Yes | API protocol type. One of: `anthropic` (Anthropic Messages API), `gemini` (Google Gemini OpenAI-compatible endpoint), `openai_completions` (OpenAI Chat Completions-compatible API), `openai_responses` (OpenAI Responses API-compatible), or `antigravity` (Cloud Code Assist SSE API) |
 | `base_url` | string | Yes | Base URL of the API endpoint. Must be a valid URL (including protocol) |
 | `api_key` | string | Yes | API key for authentication. Supports `env:VAR_NAME` syntax to reference environment variables |
-| `name` | string | No | Optional friendly name for the provider (displayed in logs and UI) |
+| `name` | string | No | Optional friendly name for the provider (displayed in logs and UI). For `antigravity`, this must be the Google Cloud `project_id` when not using OAuth credentials |
 
 > Note:
 > - For `openai_completions` and `openai_responses`, configure `base_url` as the provider root URL (usually without a trailing `/v1`).

@@ -301,6 +301,34 @@ fn extra_models() -> Vec<ModelInfo> {
             reasoning: true,
             input_audio: false,
         },
+        // Antigravity (Cloud Code Assist)
+        ModelInfo {
+            id: "antigravity/gemini-2.5-pro".into(),
+            name: "Gemini 2.5 Pro".into(),
+            provider: "antigravity".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "antigravity/gemini-2.5-flash".into(),
+            name: "Gemini 2.5 Flash".into(),
+            provider: "antigravity".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "antigravity/claude-sonnet-4.5".into(),
+            name: "Claude Sonnet 4.5".into(),
+            provider: "antigravity".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
     ]
 }
 
@@ -402,6 +430,15 @@ async fn ensure_models_cache() -> Vec<ModelInfo> {
 pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str> {
     let mut providers = Vec::new();
 
+    if let Some(instance_dir) = config_path.parent() {
+        if crate::auth::credentials_path(instance_dir).exists() {
+            providers.push("anthropic");
+        }
+        if crate::auth::antigravity_credentials_path(instance_dir).exists() {
+            providers.push("antigravity");
+        }
+    }
+
     let content = match tokio::fs::read_to_string(config_path).await {
         Ok(c) => c,
         Err(_) => return providers,
@@ -425,7 +462,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     };
 
     if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
-        providers.push("anthropic");
+        if !providers.contains(&"anthropic") {
+            providers.push("anthropic");
+        }
     }
     if has_key("openai_key", "OPENAI_API_KEY") {
         providers.push("openai");
@@ -477,6 +516,11 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
         providers.push("zai-coding-plan");
+    }
+    if has_key("antigravity_key", "ANTIGRAVITY_API_KEY") {
+        if !providers.contains(&"antigravity") {
+            providers.push("antigravity");
+        }
     }
 
     providers
