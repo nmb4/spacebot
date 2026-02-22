@@ -359,7 +359,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         "moonshot" => RoutingConfig::for_model("moonshot/kimi-k2.5".into()),
         "kimi-coding" => RoutingConfig::for_model("kimi-coding/kimi-for-coding".into()),
         "zai-coding-plan" => RoutingConfig::for_model("zai-coding-plan/glm-5".into()),
-        "antigravity" => RoutingConfig::for_model("antigravity/gemini-2.5-pro".into()),
+        "antigravity" => RoutingConfig::for_model("antigravity/gemini-3-pro-high".into()),
         // Unknown — use the standard defaults
         _ => RoutingConfig::default(),
     }

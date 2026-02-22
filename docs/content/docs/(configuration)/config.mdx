@@ -337,6 +337,16 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `antigravity_key` | string | None | Antigravity access token (or `env:VAR_NAME`) |
 | `antigravity_project_id` | string | None | Google Cloud `project_id` for Antigravity key-based auth |
 
+When routing to Antigravity, use one of these IDs (aligned with `pi-mono` `google-antigravity`):
+- `antigravity/claude-opus-4-5-thinking`
+- `antigravity/claude-opus-4-6-thinking`
+- `antigravity/claude-sonnet-4-5`
+- `antigravity/claude-sonnet-4-5-thinking`
+- `antigravity/gemini-3-flash`
+- `antigravity/gemini-3-pro-high`
+- `antigravity/gemini-3-pro-low`
+- `antigravity/gpt-oss-120b-medium`
+
 #### Custom Providers
 
 Custom providers allow configuring LLM providers with custom endpoints and API types. Use either legacy keys **or** custom providers.
