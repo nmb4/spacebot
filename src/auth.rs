@@ -13,9 +13,12 @@ const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token"
 const ANTHROPIC_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference";
 
-const ANTIGRAVITY_AUTH_API_BASE_URL: &str = "https://api.agentgateway.dev";
-const ANTIGRAVITY_AUTH_CALLBACK_URL: &str = "https://api.agentgateway.dev/callback";
-const ANTIGRAVITY_DEFAULT_SIGNIN_URL_PREFIX: &str = "https://auth.agentgateway.dev/signin?url=";
+const ANTIGRAVITY_AUTH_API_BASE_URLS: &[&str] = &[
+    "https://api.agentgateway.dev",
+    "https://api.agentgateway.ai",
+    "https://agentgateway.dev",
+    "https://agentgateway.ai",
+];
 const ANTIGRAVITY_OAUTH_CLIENT_ID: &str =
     "336323648001-c5fqumriim5d2udondps7ce2s4155vsi.apps.googleusercontent.com";
 const ANTIGRAVITY_OAUTH_CLIENT_SECRET: &str = "R_PiQ6exBlywQqD_jj4g5v2B";
@@ -174,8 +177,15 @@ impl AntigravityCredentials {
 #[derive(Deserialize)]
 struct AntigravityAuthStartResponse {
     url: Option<String>,
+    #[serde(rename = "signinUrl")]
+    signin_url: Option<String>,
     #[serde(rename = "callbackUrl")]
     callback_url: Option<String>,
+}
+
+struct AntigravityAuthSession {
+    api_base_url: String,
+    auth_url: String,
 }
 
 /// PKCE verifier/challenge pair.
@@ -389,58 +399,132 @@ pub async fn login_interactive(instance_dir: &Path, mode: AuthMode) -> Result<OA
     Ok(credentials)
 }
 
-/// Start Antigravity auth and return `(state, auth_url)`.
-async fn antigravity_start_auth(state: &str) -> Result<String> {
-    let callback_url = format!("{ANTIGRAVITY_AUTH_CALLBACK_URL}/{state}");
-    let payload = serde_json::json!({
-        "callback_url": callback_url,
-        "state": state,
-        "user_agent": "spacebot/1.0",
-        "credentials": {
-            "mode": "credentials"
-        }
-    });
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(format!("{ANTIGRAVITY_AUTH_API_BASE_URL}/auth"))
-        .json(&payload)
-        .send()
-        .await
-        .context("failed to create antigravity auth session")?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read antigravity auth session response")?;
-
-    if status.as_u16() != 201 {
-        anyhow::bail!("antigravity auth session failed ({}): {}", status, body);
-    }
-
-    let parsed: AntigravityAuthStartResponse =
-        serde_json::from_str(&body).context("failed to parse antigravity auth session response")?;
-    let signin_url_prefix = parsed
-        .url
-        .unwrap_or_else(|| ANTIGRAVITY_DEFAULT_SIGNIN_URL_PREFIX.to_string());
-    let callback = parsed
-        .callback_url
-        .unwrap_or_else(|| format!("{ANTIGRAVITY_AUTH_CALLBACK_URL}/{state}"));
-    let encoded_callback = STANDARD.encode(callback.as_bytes());
-
-    Ok(format!(
-        "{}{}",
-        signin_url_prefix,
-        urlencoding::encode(&encoded_callback)
-    ))
+fn normalize_base_url(base_url: &str) -> String {
+    base_url.trim_end_matches('/').to_string()
 }
 
-async fn antigravity_poll_for_credentials(state: &str) -> Result<serde_json::Value> {
+fn default_callback_url(base_url: &str, state: &str) -> String {
+    format!("{}/callback/{}", normalize_base_url(base_url), state)
+}
+
+fn default_signin_url_prefix(base_url: &str) -> String {
+    let base_url = normalize_base_url(base_url);
+
+    if let Some(rest) = base_url.strip_prefix("https://api.") {
+        return format!("https://auth.{rest}/signin?url=");
+    }
+    if let Some(rest) = base_url.strip_prefix("http://api.") {
+        return format!("http://auth.{rest}/signin?url=");
+    }
+    if let Some(rest) = base_url.strip_prefix("https://auth.") {
+        return format!("https://auth.{rest}/signin?url=");
+    }
+    if let Some(rest) = base_url.strip_prefix("http://auth.") {
+        return format!("http://auth.{rest}/signin?url=");
+    }
+
+    format!("{base_url}/signin?url=")
+}
+
+fn antigravity_auth_api_base_urls() -> Vec<String> {
+    let mut base_urls = Vec::new();
+
+    if let Ok(override_url) = std::env::var("ANTIGRAVITY_AUTH_API_BASE_URL") {
+        let override_url = override_url.trim();
+        if !override_url.is_empty() {
+            base_urls.push(normalize_base_url(override_url));
+        }
+    }
+
+    for default_url in ANTIGRAVITY_AUTH_API_BASE_URLS {
+        let default_url = normalize_base_url(default_url);
+        if !base_urls.contains(&default_url) {
+            base_urls.push(default_url);
+        }
+    }
+
+    base_urls
+}
+
+/// Start Antigravity auth and return the auth session metadata.
+async fn antigravity_start_auth(state: &str) -> Result<AntigravityAuthSession> {
+    let client = reqwest::Client::new();
+    let mut errors = Vec::new();
+
+    for api_base_url in antigravity_auth_api_base_urls() {
+        let callback_url = default_callback_url(&api_base_url, state);
+        let payload = serde_json::json!({
+            "callback_url": callback_url,
+            "state": state,
+            "user_agent": "spacebot/1.0",
+            "credentials": {
+                "mode": "credentials"
+            }
+        });
+
+        let response = match client
+            .post(format!("{api_base_url}/auth"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                errors.push(format!("{api_base_url}: {error}"));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read antigravity auth session response")?;
+
+        if status.as_u16() != 201 {
+            errors.push(format!(
+                "{api_base_url}: antigravity auth session failed ({status}): {body}"
+            ));
+            continue;
+        }
+
+        let parsed: AntigravityAuthStartResponse = serde_json::from_str(&body)
+            .context("failed to parse antigravity auth session response")?;
+        let signin_url_prefix = parsed
+            .signin_url
+            .or(parsed.url)
+            .unwrap_or_else(|| default_signin_url_prefix(&api_base_url));
+        let callback = parsed
+            .callback_url
+            .unwrap_or_else(|| default_callback_url(&api_base_url, state));
+        let encoded_callback = STANDARD.encode(callback.as_bytes());
+        let auth_url = format!(
+            "{}{}",
+            signin_url_prefix,
+            urlencoding::encode(&encoded_callback)
+        );
+
+        return Ok(AntigravityAuthSession {
+            api_base_url,
+            auth_url,
+        });
+    }
+
+    anyhow::bail!(
+        "failed to create antigravity auth session; tried {} endpoint(s): {}",
+        errors.len(),
+        errors.join(" | ")
+    );
+}
+
+async fn antigravity_poll_for_credentials(
+    api_base_url: &str,
+    state: &str,
+) -> Result<serde_json::Value> {
     let client = reqwest::Client::new();
     for attempt in 1..=ANTIGRAVITY_MAX_POLL_ATTEMPTS {
         let response = client
-            .get(format!("{ANTIGRAVITY_AUTH_API_BASE_URL}/auth/{state}"))
+            .get(format!("{}/auth/{state}", normalize_base_url(api_base_url)))
             .send()
             .await
             .with_context(|| format!("failed polling antigravity auth (attempt {attempt})"))?;
@@ -531,7 +615,7 @@ fn read_line_trimmed(prompt: &str) -> Result<String> {
 }
 
 fn prompt_antigravity_credentials_manual() -> Result<AntigravityCredentials> {
-    eprintln!("Automatic callback failed. Enter Antigravity credentials manually.");
+    eprintln!("Automatic OAuth flow failed. Enter Antigravity credentials manually.");
     let access_token = read_line_trimmed("Access token: ")?;
     if access_token.is_empty() {
         anyhow::bail!("access token is required");
@@ -556,20 +640,26 @@ fn prompt_antigravity_credentials_manual() -> Result<AntigravityCredentials> {
 /// Run interactive Antigravity OAuth login flow.
 pub async fn antigravity_login_interactive(instance_dir: &Path) -> Result<AntigravityCredentials> {
     let state = uuid::Uuid::new_v4().to_string();
-    let auth_url = antigravity_start_auth(&state).await?;
+    let credentials = match antigravity_start_auth(&state).await {
+        Ok(session) => {
+            eprintln!("Open this URL in your browser:\n");
+            eprintln!("  {}\n", session.auth_url);
+            eprintln!("Waiting for authorization callback...");
 
-    eprintln!("Open this URL in your browser:\n");
-    eprintln!("  {auth_url}\n");
-    eprintln!("Waiting for authorization callback...");
+            if let Err(_error) = open::that(&session.auth_url) {
+                eprintln!("(Could not open browser automatically, please copy the URL above)");
+            }
 
-    if let Err(_error) = open::that(&auth_url) {
-        eprintln!("(Could not open browser automatically, please copy the URL above)");
-    }
-
-    let credentials = match antigravity_poll_for_credentials(&state).await {
-        Ok(payload) => parse_antigravity_credentials(&payload)?,
+            match antigravity_poll_for_credentials(&session.api_base_url, &state).await {
+                Ok(payload) => parse_antigravity_credentials(&payload)?,
+                Err(error) => {
+                    eprintln!("Automatic callback did not complete: {error}");
+                    prompt_antigravity_credentials_manual()?
+                }
+            }
+        }
         Err(error) => {
-            eprintln!("Automatic callback did not complete: {error}");
+            eprintln!("Automatic OAuth start failed: {error}");
             prompt_antigravity_credentials_manual()?
         }
     };
