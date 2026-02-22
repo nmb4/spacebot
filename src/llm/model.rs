@@ -881,63 +881,101 @@ impl SpacebotModel {
                     .to_string(),
             )
         })?;
-
-        let is_claude = self.model_name.starts_with("claude");
-        let method = if is_claude {
-            "streamRawPredict"
-        } else {
-            "streamGenerateContent"
-        };
-        let endpoint = format!(
-            "{}/v1internal:{method}?alt=sse",
-            provider_config.base_url.trim_end_matches('/')
-        );
-
-        let body = if is_claude {
-            build_antigravity_claude_request(&project_id, &self.model_name, &request)
-        } else {
-            build_antigravity_gemini_request(&project_id, &self.model_name, &request)
-        };
-
-        let response = self
-            .llm_manager
-            .http_client()
-            .post(&endpoint)
-            .header(
-                "authorization",
-                format!("Bearer {}", provider_config.api_key),
-            )
-            .header("x-goog-api-client", "antigravity-rust/0.1.0")
-            .header("accept", "text/event-stream")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
-        })?;
-
-        if !status.is_success() {
-            let message = serde_json::from_str::<serde_json::Value>(&response_text)
-                .ok()
-                .and_then(|json| json["error"]["message"].as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| truncate_body(&response_text).to_string());
-            return Err(CompletionError::ProviderError(format!(
-                "Antigravity API error ({status}): {message}"
-            )));
-        }
-
-        let events = parse_sse_events(&response_text);
-        if events.is_empty() {
-            return Err(CompletionError::ResponseError(
-                "empty SSE response from Antigravity".into(),
+        let project_id = project_id
+            .trim()
+            .trim_start_matches("projects/")
+            .to_string();
+        if project_id.is_empty() {
+            return Err(CompletionError::ProviderError(
+                "antigravity project_id is empty; re-run `spacebot auth login --provider antigravity`"
+                    .to_string(),
             ));
         }
 
-        parse_antigravity_response(events, is_claude)
+        let body = build_antigravity_request(&project_id, &self.model_name, &request);
+        let antigravity_version =
+            std::env::var("PI_AI_ANTIGRAVITY_VERSION").unwrap_or_else(|_| "1.15.8".to_string());
+        let is_claude_thinking =
+            self.model_name.starts_with("claude-") && self.model_name.contains("thinking");
+
+        let mut endpoints = vec!["https://daily-cloudcode-pa.sandbox.googleapis.com".to_string()];
+        let configured = provider_config.base_url.trim_end_matches('/').to_string();
+        if !configured.is_empty() && !endpoints.contains(&configured) {
+            endpoints.push(configured);
+        }
+        let default_endpoint = "https://cloudcode-pa.googleapis.com".to_string();
+        if !endpoints.contains(&default_endpoint) {
+            endpoints.push(default_endpoint);
+        }
+
+        let mut last_error = None;
+        for base_endpoint in endpoints {
+            let endpoint = format!("{base_endpoint}/v1internal:streamGenerateContent?alt=sse");
+
+            let mut request_builder = self
+                .llm_manager
+                .http_client()
+                .post(&endpoint)
+                .header("authorization", format!("Bearer {}", provider_config.api_key))
+                .header("accept", "text/event-stream")
+                .header("content-type", "application/json")
+                .header(
+                    "user-agent",
+                    format!("antigravity/{antigravity_version} darwin/arm64"),
+                )
+                .header(
+                    "x-goog-api-client",
+                    "google-cloud-sdk vscode_cloudshelleditor/0.1",
+                )
+                .header(
+                    "client-metadata",
+                    r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+                )
+                .json(&body);
+
+            if is_claude_thinking {
+                request_builder =
+                    request_builder.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+            }
+
+            let response = request_builder
+                .send()
+                .await
+                .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+            let status = response.status();
+            let response_text = response.text().await.map_err(|e| {
+                CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            })?;
+
+            if !status.is_success() {
+                let message = serde_json::from_str::<serde_json::Value>(&response_text)
+                    .ok()
+                    .and_then(|json| json["error"]["message"].as_str().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| truncate_body(&response_text).to_string());
+                let error = CompletionError::ProviderError(format!(
+                    "Antigravity API error ({status}) from {base_endpoint}: {message}"
+                ));
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    last_error = Some(error);
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let events = parse_sse_events(&response_text);
+            if events.is_empty() {
+                return Err(CompletionError::ResponseError(
+                    "empty SSE response from Antigravity".into(),
+                ));
+            }
+
+            return parse_antigravity_response(events);
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            CompletionError::ProviderError("Antigravity API request failed".to_string())
+        }))
     }
 }
 // --- Helpers ---
@@ -1193,48 +1231,9 @@ fn convert_messages_to_openai_responses(messages: &OneOrMany<Message>) -> Vec<se
     result
 }
 
-fn build_antigravity_claude_request(
-    project_id: &str,
-    model_name: &str,
-    request: &CompletionRequest,
-) -> serde_json::Value {
-    let mut inner_request = serde_json::json!({
-        "anthropic_version": "vertex-2023-10-16",
-        "messages": convert_messages_to_antigravity_claude(&request.chat_history),
-        "max_tokens": request.max_tokens.unwrap_or(8192),
-    });
+const ANTIGRAVITY_SYSTEM_INSTRUCTION: &str = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task.";
 
-    if let Some(preamble) = &request.preamble {
-        inner_request["system"] = serde_json::json!([{ "type": "text", "text": preamble }]);
-    }
-
-    if let Some(temperature) = request.temperature {
-        inner_request["temperature"] = serde_json::json!(temperature);
-    }
-
-    if !request.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = request
-            .tools
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.parameters,
-                })
-            })
-            .collect();
-        inner_request["tools"] = serde_json::json!(tools);
-    }
-
-    serde_json::json!({
-        "project": format!("projects/{project_id}"),
-        "model": model_name,
-        "request": inner_request,
-    })
-}
-
-fn build_antigravity_gemini_request(
+fn build_antigravity_request(
     project_id: &str,
     model_name: &str,
     request: &CompletionRequest,
@@ -1244,8 +1243,22 @@ fn build_antigravity_gemini_request(
     });
 
     if let Some(preamble) = &request.preamble {
+        let mut parts = vec![
+            serde_json::json!({ "text": ANTIGRAVITY_SYSTEM_INSTRUCTION }),
+            serde_json::json!({ "text": format!("Please ignore following [ignore]{}[/ignore]", ANTIGRAVITY_SYSTEM_INSTRUCTION) }),
+        ];
+        parts.push(serde_json::json!({ "text": preamble }));
         inner_request["systemInstruction"] = serde_json::json!({
-            "parts": [{ "text": preamble }],
+            "role": "user",
+            "parts": parts,
+        });
+    } else {
+        inner_request["systemInstruction"] = serde_json::json!({
+            "role": "user",
+            "parts": [
+                { "text": ANTIGRAVITY_SYSTEM_INSTRUCTION },
+                { "text": format!("Please ignore following [ignore]{}[/ignore]", ANTIGRAVITY_SYSTEM_INSTRUCTION) }
+            ],
         });
     }
 
@@ -1265,11 +1278,12 @@ fn build_antigravity_gemini_request(
             .tools
             .iter()
             .map(|tool| {
-                serde_json::json!({
+                let mut declaration = serde_json::json!({
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters,
-                })
+                });
+                declaration["parameters"] = tool.parameters.clone();
+                declaration
             })
             .collect();
         inner_request["tools"] = serde_json::json!([{
@@ -1277,54 +1291,20 @@ fn build_antigravity_gemini_request(
         }]);
     }
 
+    let request_id = format!(
+        "agent-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        uuid::Uuid::new_v4().simple()
+    );
+
     serde_json::json!({
-        "project": format!("projects/{project_id}"),
+        "project": project_id,
         "model": model_name,
         "request": inner_request,
+        "requestType": "agent",
+        "userAgent": "antigravity",
+        "requestId": request_id,
     })
-}
-
-fn convert_messages_to_antigravity_claude(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
-    messages
-        .iter()
-        .map(|message| match message {
-            Message::User { content } => {
-                let parts: Vec<serde_json::Value> = content
-                    .iter()
-                    .filter_map(|item| match item {
-                        UserContent::Text(text) => {
-                            Some(serde_json::json!({"type": "text", "text": text.text}))
-                        }
-                        UserContent::ToolResult(result) => Some(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": result.id,
-                            "content": tool_result_content_to_string(&result.content),
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-                serde_json::json!({ "role": "user", "content": parts })
-            }
-            Message::Assistant { content, .. } => {
-                let parts: Vec<serde_json::Value> = content
-                    .iter()
-                    .filter_map(|item| match item {
-                        AssistantContent::Text(text) => {
-                            Some(serde_json::json!({"type": "text", "text": text.text}))
-                        }
-                        AssistantContent::ToolCall(tool_call) => Some(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "input": tool_call.function.arguments,
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-                serde_json::json!({ "role": "assistant", "content": parts })
-            }
-        })
-        .collect()
 }
 
 fn convert_messages_to_antigravity_gemini(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
@@ -1595,83 +1575,16 @@ fn parse_anthropic_response(
 
 fn parse_antigravity_response(
     events: Vec<serde_json::Value>,
-    is_claude: bool,
 ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-    if is_claude {
-        let mut assistant_content = Vec::new();
-        let mut input_tokens = 0;
-        let mut output_tokens = 0;
-
-        for event in &events {
-            let message = event.get("message").unwrap_or(event);
-            let content = message
-                .get("content")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-
-            for part in content {
-                match part["type"].as_str() {
-                    Some("text") => {
-                        if let Some(text) = part["text"].as_str()
-                            && !text.is_empty()
-                        {
-                            let is_duplicate = assistant_content.last().is_some_and(|content| {
-                                matches!(content, AssistantContent::Text(existing) if existing.text == text)
-                            });
-                            if !is_duplicate {
-                                assistant_content.push(AssistantContent::Text(Text {
-                                    text: text.to_string(),
-                                }));
-                            }
-                        }
-                    }
-                    Some("tool_use") => {
-                        let id = part["id"]
-                            .as_str()
-                            .map(ToOwned::to_owned)
-                            .unwrap_or_else(|| format!("tool_{}", uuid::Uuid::new_v4()));
-                        let name = part["name"].as_str().unwrap_or("").to_string();
-                        let arguments = part["input"].clone();
-                        assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                            id, name, arguments,
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-
-            input_tokens = message["usage"]["input_tokens"]
-                .as_u64()
-                .unwrap_or(input_tokens);
-            output_tokens = message["usage"]["output_tokens"]
-                .as_u64()
-                .unwrap_or(output_tokens);
-        }
-
-        let choice = OneOrMany::many(assistant_content).map_err(|_| {
-            CompletionError::ResponseError("empty response from Antigravity Claude".into())
-        })?;
-        let raw_body = serde_json::json!({ "events": events });
-        return Ok(completion::CompletionResponse {
-            choice,
-            usage: completion::Usage {
-                input_tokens,
-                output_tokens,
-                total_tokens: input_tokens + output_tokens,
-                cached_input_tokens: 0,
-            },
-            raw_response: RawResponse { body: raw_body },
-        });
-    }
-
     let mut text_segments: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut input_tokens = 0;
     let mut output_tokens = 0;
 
     for event in &events {
-        if let Some(candidates) = event["candidates"].as_array() {
+        let response = event.get("response").unwrap_or(event);
+
+        if let Some(candidates) = response["candidates"].as_array() {
             for candidate in candidates {
                 if let Some(parts) = candidate["content"]["parts"].as_array() {
                     for part in parts {
@@ -1708,10 +1621,10 @@ fn parse_antigravity_response(
             }
         }
 
-        input_tokens = event["usageMetadata"]["promptTokenCount"]
+        input_tokens = response["usageMetadata"]["promptTokenCount"]
             .as_u64()
             .unwrap_or(input_tokens);
-        output_tokens = event["usageMetadata"]["candidatesTokenCount"]
+        output_tokens = response["usageMetadata"]["candidatesTokenCount"]
             .as_u64()
             .unwrap_or(output_tokens);
     }
@@ -1726,9 +1639,8 @@ fn parse_antigravity_response(
         assistant_content.push(AssistantContent::ToolCall(tool_call));
     }
 
-    let choice = OneOrMany::many(assistant_content).map_err(|_| {
-        CompletionError::ResponseError("empty response from Antigravity Gemini".into())
-    })?;
+    let choice = OneOrMany::many(assistant_content)
+        .map_err(|_| CompletionError::ResponseError("empty response from Antigravity".into()))?;
     let raw_body = serde_json::json!({ "events": events });
 
     Ok(completion::CompletionResponse {
