@@ -892,11 +892,9 @@ impl SpacebotModel {
             ));
         }
 
-        let body = build_antigravity_request(&project_id, &self.model_name, &request);
         let antigravity_version =
             std::env::var("PI_AI_ANTIGRAVITY_VERSION").unwrap_or_else(|_| "1.15.8".to_string());
-        let is_claude_thinking =
-            self.model_name.starts_with("claude-") && self.model_name.contains("thinking");
+        let model_candidates = antigravity_model_candidates(&self.model_name);
 
         let mut endpoints = vec!["https://daily-cloudcode-pa.sandbox.googleapis.com".to_string()];
         let configured = provider_config.base_url.trim_end_matches('/').to_string();
@@ -909,68 +907,88 @@ impl SpacebotModel {
         }
 
         let mut last_error = None;
-        for base_endpoint in endpoints {
-            let endpoint = format!("{base_endpoint}/v1internal:streamGenerateContent?alt=sse");
-
-            let mut request_builder = self
-                .llm_manager
-                .http_client()
-                .post(&endpoint)
-                .header("authorization", format!("Bearer {}", provider_config.api_key))
-                .header("accept", "text/event-stream")
-                .header("content-type", "application/json")
-                .header(
-                    "user-agent",
-                    format!("antigravity/{antigravity_version} darwin/arm64"),
-                )
-                .header(
-                    "x-goog-api-client",
-                    "google-cloud-sdk vscode_cloudshelleditor/0.1",
-                )
-                .header(
-                    "client-metadata",
-                    r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
-                )
-                .json(&body);
-
-            if is_claude_thinking {
-                request_builder =
-                    request_builder.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+        for model_name in &model_candidates {
+            if model_name != &self.model_name {
+                tracing::info!(
+                    requested_model = %self.model_name,
+                    fallback_model = %model_name,
+                    "trying Antigravity model fallback"
+                );
             }
 
-            let response = request_builder
-                .send()
-                .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            let body = build_antigravity_request(&project_id, model_name, &request);
+            let is_claude_thinking = antigravity_requires_claude_thinking_header(model_name);
 
-            let status = response.status();
-            let response_text = response.text().await.map_err(|e| {
-                CompletionError::ProviderError(format!("failed to read response body: {e}"))
-            })?;
+            for base_endpoint in &endpoints {
+                let endpoint = format!("{base_endpoint}/v1internal:streamGenerateContent?alt=sse");
 
-            if !status.is_success() {
-                let message = serde_json::from_str::<serde_json::Value>(&response_text)
-                    .ok()
-                    .and_then(|json| json["error"]["message"].as_str().map(ToOwned::to_owned))
-                    .unwrap_or_else(|| truncate_body(&response_text).to_string());
-                let error = CompletionError::ProviderError(format!(
-                    "Antigravity API error ({status}) from {base_endpoint}: {message}"
-                ));
-                if status == reqwest::StatusCode::NOT_FOUND {
-                    last_error = Some(error);
-                    continue;
+                let mut request_builder = self
+                    .llm_manager
+                    .http_client()
+                    .post(&endpoint)
+                    .header("authorization", format!("Bearer {}", provider_config.api_key))
+                    .header("accept", "text/event-stream")
+                    .header("content-type", "application/json")
+                    .header(
+                        "user-agent",
+                        format!("antigravity/{antigravity_version} darwin/arm64"),
+                    )
+                    .header(
+                        "x-goog-api-client",
+                        "google-cloud-sdk vscode_cloudshelleditor/0.1",
+                    )
+                    .header(
+                        "client-metadata",
+                        r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+                    )
+                    .json(&body);
+
+                if is_claude_thinking {
+                    request_builder =
+                        request_builder.header("anthropic-beta", "interleaved-thinking-2025-05-14");
                 }
-                return Err(error);
-            }
 
-            let events = parse_sse_events(&response_text);
-            if events.is_empty() {
-                return Err(CompletionError::ResponseError(
-                    "empty SSE response from Antigravity".into(),
-                ));
-            }
+                let response = request_builder
+                    .send()
+                    .await
+                    .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
-            return parse_antigravity_response(events);
+                let status = response.status();
+                let response_text = response.text().await.map_err(|e| {
+                    CompletionError::ProviderError(format!("failed to read response body: {e}"))
+                })?;
+
+                if !status.is_success() {
+                    let message = serde_json::from_str::<serde_json::Value>(&response_text)
+                        .ok()
+                        .and_then(|json| json["error"]["message"].as_str().map(ToOwned::to_owned))
+                        .unwrap_or_else(|| truncate_body(&response_text).to_string());
+                    let error = CompletionError::ProviderError(format!(
+                        "Antigravity API error ({status}) from {base_endpoint} using model {model_name}: {message}"
+                    ));
+
+                    if status == reqwest::StatusCode::NOT_FOUND {
+                        last_error = Some(error);
+                        continue;
+                    }
+
+                    if should_try_next_antigravity_model(status, &message) {
+                        last_error = Some(error);
+                        break;
+                    }
+
+                    return Err(error);
+                }
+
+                let events = parse_sse_events(&response_text);
+                if events.is_empty() {
+                    return Err(CompletionError::ResponseError(
+                        "empty SSE response from Antigravity".into(),
+                    ));
+                }
+
+                return parse_antigravity_response(events);
+            }
         }
 
         Err(last_error.unwrap_or_else(|| {
@@ -1232,6 +1250,103 @@ fn convert_messages_to_openai_responses(messages: &OneOrMany<Message>) -> Vec<se
 }
 
 const ANTIGRAVITY_SYSTEM_INSTRUCTION: &str = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task.";
+
+fn antigravity_requires_claude_thinking_header(model_name: &str) -> bool {
+    model_name.starts_with("claude-")
+        && (model_name.contains("thinking") || model_name == "claude-sonnet-4-6")
+}
+
+fn antigravity_model_candidates(requested_model_name: &str) -> Vec<String> {
+    let mut model_candidates = Vec::new();
+    let mut add_model = |model_name: &str| {
+        if !model_candidates
+            .iter()
+            .any(|existing| existing == model_name)
+        {
+            model_candidates.push(model_name.to_string());
+        }
+    };
+
+    let prefer_alias_first = matches!(
+        requested_model_name,
+        "claude-opus-4-5"
+            | "claude-opus-4-5-thinking"
+            | "claude-sonnet-4-5"
+            | "claude-sonnet-4-5-thinking"
+    );
+
+    if prefer_alias_first {
+        if let Some(alias) = antigravity_model_alias(requested_model_name) {
+            add_model(alias);
+        }
+        add_model(requested_model_name);
+    } else {
+        add_model(requested_model_name);
+        if let Some(alias) = antigravity_model_alias(requested_model_name) {
+            add_model(alias);
+        }
+    }
+
+    if requested_model_name.starts_with("claude-sonnet-4-")
+        || requested_model_name == "claude-sonnet-4-6-thinking"
+    {
+        add_model("claude-sonnet-4-6");
+        add_model("claude-sonnet-4-5-thinking");
+        add_model("claude-sonnet-4-5");
+    }
+
+    if requested_model_name.starts_with("claude-opus-4-") {
+        add_model("claude-opus-4-6-thinking");
+        add_model("claude-opus-4-5-thinking");
+    }
+
+    if requested_model_name.starts_with("gemini-3-pro")
+        || requested_model_name.starts_with("gemini-3.1-pro")
+    {
+        add_model("gemini-3.1-pro-high");
+        add_model("gemini-3.1-pro-low");
+        add_model("gemini-3-pro-high");
+        add_model("gemini-3-pro-low");
+    }
+
+    if requested_model_name == "gemini-3-pro" || requested_model_name == "gemini-3.1-pro" {
+        add_model("gemini-3.1-pro-high");
+        add_model("gemini-3-pro-high");
+    }
+
+    model_candidates
+}
+
+fn antigravity_model_alias(model_name: &str) -> Option<&'static str> {
+    match model_name {
+        "claude-opus-4-5" => Some("claude-opus-4-6-thinking"),
+        "claude-opus-4-5-thinking" => Some("claude-opus-4-6-thinking"),
+        "claude-opus-4-6" => Some("claude-opus-4-6-thinking"),
+        "claude-sonnet-4-5" => Some("claude-sonnet-4-6"),
+        "claude-sonnet-4-5-thinking" => Some("claude-sonnet-4-6"),
+        "claude-sonnet-4-6-thinking" => Some("claude-sonnet-4-6"),
+        "gemini-3-pro" => Some("gemini-3-pro-high"),
+        "gemini-3.1-pro" => Some("gemini-3.1-pro-high"),
+        _ => None,
+    }
+}
+
+fn should_try_next_antigravity_model(status: reqwest::StatusCode, message: &str) -> bool {
+    let message_lower = message.to_ascii_lowercase();
+    let mentions_model = message_lower.contains("model");
+    let looks_like_missing_or_mismatch = message_lower.contains("not found")
+        || message_lower.contains("requested entity")
+        || message_lower.contains("unknown")
+        || message_lower.contains("unsupported")
+        || message_lower.contains("unavailable")
+        || message_lower.contains("no longer available");
+
+    status == reqwest::StatusCode::NOT_FOUND
+        || (status == reqwest::StatusCode::BAD_REQUEST && looks_like_missing_or_mismatch)
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && mentions_model
+            && looks_like_missing_or_mismatch)
+}
 
 fn build_antigravity_request(
     project_id: &str,
@@ -1943,5 +2058,45 @@ mod tests {
 
         assert!(saw_reasoning);
         assert!(saw_tool_call);
+    }
+
+    #[test]
+    fn antigravity_model_candidates_promote_sonnet_4_5_to_4_6() {
+        let candidates = antigravity_model_candidates("claude-sonnet-4-5");
+        assert_eq!(candidates[0], "claude-sonnet-4-6");
+        assert!(candidates.iter().any(|model| model == "claude-sonnet-4-6"));
+        assert!(candidates.iter().any(|model| model == "claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn antigravity_model_candidates_map_sonnet_4_6_thinking_alias() {
+        let candidates = antigravity_model_candidates("claude-sonnet-4-6-thinking");
+        assert_eq!(candidates[0], "claude-sonnet-4-6-thinking");
+        assert_eq!(candidates[1], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn antigravity_requires_claude_thinking_header_for_sonnet_4_6() {
+        assert!(antigravity_requires_claude_thinking_header(
+            "claude-sonnet-4-6"
+        ));
+        assert!(antigravity_requires_claude_thinking_header(
+            "claude-opus-4-6-thinking"
+        ));
+        assert!(!antigravity_requires_claude_thinking_header(
+            "gemini-3-flash"
+        ));
+    }
+
+    #[test]
+    fn antigravity_model_retry_only_triggers_for_model_errors() {
+        assert!(should_try_next_antigravity_model(
+            reqwest::StatusCode::BAD_REQUEST,
+            "Requested entity was not found"
+        ));
+        assert!(!should_try_next_antigravity_model(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "OAuth 2 credentials are invalid"
+        ));
     }
 }

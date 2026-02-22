@@ -337,15 +337,17 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `antigravity_key` | string | None | Antigravity access token (or `env:VAR_NAME`) |
 | `antigravity_project_id` | string | None | Google Cloud `project_id` for Antigravity key-based auth |
 
-When routing to Antigravity, use one of these IDs (aligned with `pi-mono` `google-antigravity`):
-- `antigravity/claude-opus-4-5-thinking`
+When routing to Antigravity, use one of these IDs:
 - `antigravity/claude-opus-4-6-thinking`
-- `antigravity/claude-sonnet-4-5`
-- `antigravity/claude-sonnet-4-5-thinking`
+- `antigravity/claude-sonnet-4-6`
 - `antigravity/gemini-3-flash`
 - `antigravity/gemini-3-pro-high`
 - `antigravity/gemini-3-pro-low`
+- `antigravity/gemini-3.1-pro-high`
+- `antigravity/gemini-3.1-pro-low`
 - `antigravity/gpt-oss-120b-medium`
+
+Spacebot automatically maps common legacy IDs to current Antigravity IDs (for example `claude-sonnet-4-5` -> `claude-sonnet-4-6`).
 
 #### Custom Providers
 

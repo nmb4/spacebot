@@ -208,15 +208,17 @@ channel = "my-provider/my-model"
 Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, **Kimi Coding Plan**, **Z.AI Coding Plan**, and **Antigravity (Cloud Code Assist)** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, `kimi_coding_key`, `zai_coding_plan_key`, or `antigravity_key` in `[llm]`.
 For key-based Antigravity usage (without OAuth), also set `antigravity_project_id`.
 
-Antigravity model IDs currently aligned with `pi-mono` (`google-antigravity`):
-- `antigravity/claude-opus-4-5-thinking`
+Antigravity model IDs currently accepted by Spacebot:
 - `antigravity/claude-opus-4-6-thinking`
-- `antigravity/claude-sonnet-4-5`
-- `antigravity/claude-sonnet-4-5-thinking`
+- `antigravity/claude-sonnet-4-6`
 - `antigravity/gemini-3-flash`
 - `antigravity/gemini-3-pro-high`
 - `antigravity/gemini-3-pro-low`
+- `antigravity/gemini-3.1-pro-high`
+- `antigravity/gemini-3.1-pro-low`
 - `antigravity/gpt-oss-120b-medium`
+
+Spacebot also auto-maps legacy Antigravity IDs to current equivalents (for example `claude-sonnet-4-5` -> `claude-sonnet-4-6`, `claude-opus-4-5-thinking` -> `claude-opus-4-6-thinking`).
 
 ### Skills
 
