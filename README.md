@@ -472,6 +472,7 @@ spacebot auth logout --provider antigravity
 OAuth tokens are stored in `anthropic_oauth.json` and `antigravity_oauth.json` and auto-refresh transparently before each API call. When OAuth credentials are present, they take priority over static provider keys.
 
 For Antigravity OAuth, set `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET` in your environment before running `spacebot auth login --provider antigravity`.
+For model compatibility, Spacebot auto-tries Antigravity client versions `1.23.0`, `1.25.0`, and `1.15.8` unless you explicitly set `PI_AI_ANTIGRAVITY_VERSION`.
 
 ---
 

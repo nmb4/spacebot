@@ -892,8 +892,7 @@ impl SpacebotModel {
             ));
         }
 
-        let antigravity_version =
-            std::env::var("PI_AI_ANTIGRAVITY_VERSION").unwrap_or_else(|_| "1.15.8".to_string());
+        let antigravity_versions = antigravity_user_agent_versions();
         let model_candidates = antigravity_model_candidates(&self.model_name);
 
         let mut endpoints = vec!["https://daily-cloudcode-pa.sandbox.googleapis.com".to_string()];
@@ -920,74 +919,91 @@ impl SpacebotModel {
             let is_claude_thinking = antigravity_requires_claude_thinking_header(model_name);
 
             for base_endpoint in &endpoints {
-                let endpoint = format!("{base_endpoint}/v1internal:streamGenerateContent?alt=sse");
+                for antigravity_version in &antigravity_versions {
+                    let endpoint =
+                        format!("{base_endpoint}/v1internal:streamGenerateContent?alt=sse");
 
-                let mut request_builder = self
-                    .llm_manager
-                    .http_client()
-                    .post(&endpoint)
-                    .header("authorization", format!("Bearer {}", provider_config.api_key))
-                    .header("accept", "text/event-stream")
-                    .header("content-type", "application/json")
-                    .header(
-                        "user-agent",
-                        format!("antigravity/{antigravity_version} darwin/arm64"),
-                    )
-                    .header(
-                        "x-goog-api-client",
-                        "google-cloud-sdk vscode_cloudshelleditor/0.1",
-                    )
-                    .header(
-                        "client-metadata",
-                        r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
-                    )
-                    .json(&body);
+                    let mut request_builder = self
+                        .llm_manager
+                        .http_client()
+                        .post(&endpoint)
+                        .header("authorization", format!("Bearer {}", provider_config.api_key))
+                        .header("accept", "text/event-stream")
+                        .header("content-type", "application/json")
+                        .header(
+                            "user-agent",
+                            format!("antigravity/{antigravity_version} darwin/arm64"),
+                        )
+                        .header(
+                            "x-goog-api-client",
+                            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+                        )
+                        .header(
+                            "client-metadata",
+                            r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+                        )
+                        .json(&body);
 
-                if is_claude_thinking {
-                    request_builder =
-                        request_builder.header("anthropic-beta", "interleaved-thinking-2025-05-14");
-                }
+                    if is_claude_thinking {
+                        request_builder = request_builder
+                            .header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                    }
 
-                let response = request_builder
-                    .send()
-                    .await
-                    .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+                    let response = request_builder
+                        .send()
+                        .await
+                        .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
-                let status = response.status();
-                let response_text = response.text().await.map_err(|e| {
-                    CompletionError::ProviderError(format!("failed to read response body: {e}"))
-                })?;
+                    let status = response.status();
+                    let response_text = response.text().await.map_err(|e| {
+                        CompletionError::ProviderError(format!("failed to read response body: {e}"))
+                    })?;
 
-                if !status.is_success() {
-                    let message = serde_json::from_str::<serde_json::Value>(&response_text)
-                        .ok()
-                        .and_then(|json| json["error"]["message"].as_str().map(ToOwned::to_owned))
-                        .unwrap_or_else(|| truncate_body(&response_text).to_string());
-                    let error = CompletionError::ProviderError(format!(
-                        "Antigravity API error ({status}) from {base_endpoint} using model {model_name}: {message}"
-                    ));
-
-                    if status == reqwest::StatusCode::NOT_FOUND {
-                        last_error = Some(error);
+                    if is_antigravity_version_upgrade_message(&response_text) {
+                        last_error = Some(CompletionError::ProviderError(format!(
+                            "Antigravity requested newer client version at {base_endpoint} for model {model_name}"
+                        )));
                         continue;
                     }
 
-                    if should_try_next_antigravity_model(status, &message) {
-                        last_error = Some(error);
-                        break;
+                    if !status.is_success() {
+                        let message = serde_json::from_str::<serde_json::Value>(&response_text)
+                            .ok()
+                            .and_then(|json| {
+                                json["error"]["message"].as_str().map(ToOwned::to_owned)
+                            })
+                            .unwrap_or_else(|| truncate_body(&response_text).to_string());
+                        let error = CompletionError::ProviderError(format!(
+                            "Antigravity API error ({status}) from {base_endpoint} using model {model_name}: {message}"
+                        ));
+
+                        if is_antigravity_version_upgrade_message(&message) {
+                            last_error = Some(error);
+                            continue;
+                        }
+
+                        if status == reqwest::StatusCode::NOT_FOUND {
+                            last_error = Some(error);
+                            continue;
+                        }
+
+                        if should_try_next_antigravity_model(status, &message) {
+                            last_error = Some(error);
+                            break;
+                        }
+
+                        return Err(error);
                     }
 
-                    return Err(error);
-                }
+                    let events = parse_sse_events(&response_text);
+                    if events.is_empty() {
+                        return Err(CompletionError::ResponseError(
+                            "empty SSE response from Antigravity".into(),
+                        ));
+                    }
 
-                let events = parse_sse_events(&response_text);
-                if events.is_empty() {
-                    return Err(CompletionError::ResponseError(
-                        "empty SSE response from Antigravity".into(),
-                    ));
+                    return parse_antigravity_response(events);
                 }
-
-                return parse_antigravity_response(events);
             }
         }
 
@@ -1354,7 +1370,7 @@ fn build_antigravity_request(
     request: &CompletionRequest,
 ) -> serde_json::Value {
     let mut inner_request = serde_json::json!({
-        "contents": convert_messages_to_antigravity_gemini(&request.chat_history),
+        "contents": convert_messages_to_antigravity_gemini(&request.chat_history, model_name),
     });
 
     if let Some(preamble) = &request.preamble {
@@ -1422,9 +1438,15 @@ fn build_antigravity_request(
     })
 }
 
-fn convert_messages_to_antigravity_gemini(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
+fn convert_messages_to_antigravity_gemini(
+    messages: &OneOrMany<Message>,
+    model_name: &str,
+) -> Vec<serde_json::Value> {
     let mut result = Vec::new();
-    let mut tool_call_name_by_id: HashMap<String, String> = HashMap::new();
+    let requires_tool_call_id = antigravity_requires_tool_call_id(model_name);
+    let requires_tool_call_thought_signature =
+        antigravity_requires_tool_call_thought_signature(model_name);
+    let mut tool_calls_by_original_id: HashMap<String, (String, String)> = HashMap::new();
 
     for message in messages.iter() {
         match message {
@@ -1437,17 +1459,26 @@ fn convert_messages_to_antigravity_gemini(messages: &OneOrMany<Message>) -> Vec<
                             parts.push(serde_json::json!({ "text": text.text }));
                         }
                         UserContent::ToolResult(tool_result) => {
-                            let tool_name = tool_call_name_by_id
+                            let (tool_name, normalized_tool_call_id) = tool_calls_by_original_id
                                 .get(&tool_result.id)
                                 .cloned()
-                                .unwrap_or_else(|| "tool_result".to_string());
-                            parts.push(serde_json::json!({
-                                "functionResponse": {
-                                    "name": tool_name,
-                                    "response": {
-                                        "output": tool_result_content_to_string(&tool_result.content),
-                                    }
+                                .unwrap_or_else(|| {
+                                    let fallback_id =
+                                        normalize_antigravity_tool_call_id(&tool_result.id);
+                                    ("tool_result".to_string(), fallback_id)
+                                });
+                            let mut function_response = serde_json::json!({
+                                "name": tool_name,
+                                "response": {
+                                    "output": tool_result_content_to_string(&tool_result.content),
                                 }
+                            });
+                            if requires_tool_call_id {
+                                function_response["id"] =
+                                    serde_json::json!(normalized_tool_call_id);
+                            }
+                            parts.push(serde_json::json!({
+                                "functionResponse": function_response
                             }));
                         }
                         _ => {}
@@ -1469,14 +1500,46 @@ fn convert_messages_to_antigravity_gemini(messages: &OneOrMany<Message>) -> Vec<
                             parts.push(serde_json::json!({ "text": text.text }));
                         }
                         AssistantContent::ToolCall(tool_call) => {
-                            tool_call_name_by_id
-                                .insert(tool_call.id.clone(), tool_call.function.name.clone());
-                            parts.push(serde_json::json!({
-                                "functionCall": {
-                                    "name": tool_call.function.name,
-                                    "args": tool_call.function.arguments,
-                                }
-                            }));
+                            let normalized_tool_call_id =
+                                normalize_antigravity_tool_call_id(&tool_call.id);
+                            let thought_signature =
+                                extract_antigravity_thought_signature_from_tool_call(tool_call);
+
+                            tool_calls_by_original_id.insert(
+                                tool_call.id.clone(),
+                                (
+                                    tool_call.function.name.clone(),
+                                    normalized_tool_call_id.clone(),
+                                ),
+                            );
+
+                            if requires_tool_call_thought_signature && thought_signature.is_none() {
+                                let arguments =
+                                    serde_json::to_string(&tool_call.function.arguments)
+                                        .unwrap_or_else(|_| "{}".to_string());
+                                parts.push(serde_json::json!({
+                                    "text": format!(
+                                        "[Historical context: prior assistant called tool '{}' with arguments {}. Use proper function calling in this turn.]",
+                                        tool_call.function.name, arguments
+                                    )
+                                }));
+                                continue;
+                            }
+
+                            let mut function_call = serde_json::json!({
+                                "name": tool_call.function.name,
+                                "args": tool_call.function.arguments,
+                            });
+                            if requires_tool_call_id {
+                                function_call["id"] = serde_json::json!(normalized_tool_call_id);
+                            }
+                            let mut part = serde_json::json!({
+                                "functionCall": function_call
+                            });
+                            if let Some(signature) = thought_signature {
+                                part["thoughtSignature"] = serde_json::json!(signature);
+                            }
+                            parts.push(part);
                         }
                         _ => {}
                     }
@@ -1493,6 +1556,76 @@ fn convert_messages_to_antigravity_gemini(messages: &OneOrMany<Message>) -> Vec<
     }
 
     result
+}
+
+fn antigravity_requires_tool_call_id(model_name: &str) -> bool {
+    model_name.starts_with("claude-") || model_name.starts_with("gpt-oss-")
+}
+
+fn antigravity_requires_tool_call_thought_signature(model_name: &str) -> bool {
+    model_name.starts_with("gemini-3")
+}
+
+fn normalize_antigravity_tool_call_id(id: &str) -> String {
+    let mut normalized = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if normalized.is_empty() {
+        normalized = format!("tool_{}", uuid::Uuid::new_v4().simple());
+    }
+    if normalized.len() > 64 {
+        normalized.truncate(64);
+    }
+    normalized
+}
+
+fn extract_antigravity_thought_signature_from_tool_call(tool_call: &ToolCall) -> Option<String> {
+    if let Some(signature) = &tool_call.signature
+        && !signature.is_empty()
+    {
+        return Some(signature.clone());
+    }
+
+    tool_call
+        .additional_params
+        .as_ref()
+        .and_then(|params| {
+            params
+                .get("thoughtSignature")
+                .or_else(|| params.get("thought_signature"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn antigravity_user_agent_versions() -> Vec<String> {
+    if let Ok(version) = std::env::var("PI_AI_ANTIGRAVITY_VERSION") {
+        let trimmed = version.trim();
+        if !trimmed.is_empty() {
+            return vec![trimmed.to_string()];
+        }
+    }
+
+    let mut versions = Vec::new();
+    for version in ["1.23.0", "1.25.0", "1.15.8"] {
+        if !versions.iter().any(|existing| existing == version) {
+            versions.push(version.to_string());
+        }
+    }
+    versions
+}
+
+fn is_antigravity_version_upgrade_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("not available on this version")
+        || (lower.contains("upgrade") && lower.contains("latest version"))
 }
 
 fn parse_sse_events(response_text: &str) -> Vec<serde_json::Value> {
@@ -1603,7 +1736,12 @@ fn truncate_body(body: &str) -> &str {
 
 // --- Response parsing ---
 
-fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> ToolCall {
+fn make_tool_call(
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+    signature: Option<String>,
+) -> ToolCall {
     ToolCall {
         id,
         call_id: None,
@@ -1611,7 +1749,7 @@ fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> Too
             name: name.trim().to_string(),
             arguments,
         },
-        signature: None,
+        signature,
         additional_params: None,
     }
 }
@@ -1636,7 +1774,7 @@ fn parse_anthropic_response(
                 let name = block["name"].as_str().unwrap_or("").to_string();
                 let arguments = block["input"].clone();
                 assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                    id, name, arguments,
+                    id, name, arguments, None,
                 )));
             }
             Some("thinking") => {
@@ -1711,6 +1849,11 @@ fn parse_antigravity_response(
                         }
 
                         if let Some(function_call) = part["functionCall"].as_object() {
+                            let id = function_call
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
                             let name = function_call
                                 .get("name")
                                 .and_then(serde_json::Value::as_str)
@@ -1720,15 +1863,17 @@ fn parse_antigravity_response(
                                 .get("args")
                                 .cloned()
                                 .unwrap_or_else(|| serde_json::json!({}));
+                            let signature = part
+                                .get("thoughtSignature")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned);
                             let already_present = tool_calls.iter().any(|call| {
-                                call.function.name == name && call.function.arguments == arguments
+                                call.id == id
+                                    || (call.function.name == name
+                                        && call.function.arguments == arguments)
                             });
                             if !already_present {
-                                tool_calls.push(make_tool_call(
-                                    format!("call_{}", uuid::Uuid::new_v4()),
-                                    name,
-                                    arguments,
-                                ));
+                                tool_calls.push(make_tool_call(id, name, arguments, signature));
                             }
                         }
                     }
@@ -1831,7 +1976,7 @@ fn parse_openai_response(
                 .or_else(|| arguments_field.as_object().map(|_| arguments_field.clone()))
                 .unwrap_or(serde_json::json!({}));
             assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                id, name, arguments,
+                id, name, arguments, None,
             )));
         }
     }
@@ -1901,7 +2046,7 @@ fn parse_openai_responses_response(
                     .unwrap_or(serde_json::json!({}));
 
                 assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                    call_id, name, arguments,
+                    call_id, name, arguments, None,
                 )));
             }
             _ => {}
@@ -1980,6 +2125,7 @@ mod tests {
             "call_1".to_string(),
             "shell".to_string(),
             serde_json::json!({"command": "ls"}),
+            None,
         ))])
         .expect("assistant content should build");
         let messages = OneOrMany::many(vec![Message::Assistant {
@@ -2004,6 +2150,7 @@ mod tests {
                 "call_1".to_string(),
                 "shell".to_string(),
                 serde_json::json!({"command": "ls"}),
+                None,
             )),
         ])
         .expect("assistant content should build");
@@ -2097,6 +2244,142 @@ mod tests {
         assert!(!should_try_next_antigravity_model(
             reqwest::StatusCode::UNAUTHORIZED,
             "OAuth 2 credentials are invalid"
+        ));
+    }
+
+    #[test]
+    fn antigravity_convert_messages_adds_required_claude_tool_call_ids() {
+        let assistant_content = OneOrMany::many(vec![AssistantContent::ToolCall(make_tool_call(
+            "toolu:1/abc".to_string(),
+            "ping".to_string(),
+            serde_json::json!({"x": 1}),
+            None,
+        ))])
+        .expect("assistant content should build");
+
+        let tool_result_content = OneOrMany::one(rig::message::ToolResultContent::Text(Text {
+            text: "ok".to_string(),
+        }));
+        let user_content = OneOrMany::one(UserContent::ToolResult(rig::message::ToolResult {
+            id: "toolu:1/abc".to_string(),
+            call_id: None,
+            content: tool_result_content,
+        }));
+
+        let messages = OneOrMany::many(vec![
+            Message::Assistant {
+                id: None,
+                content: assistant_content,
+            },
+            Message::User {
+                content: user_content,
+            },
+        ])
+        .expect("messages should build");
+
+        let converted =
+            convert_messages_to_antigravity_gemini(&messages, "claude-opus-4-6-thinking");
+        let function_call_id = converted[0]["parts"][0]["functionCall"]["id"]
+            .as_str()
+            .expect("functionCall.id should be present");
+        let function_response_id = converted[1]["parts"][0]["functionResponse"]["id"]
+            .as_str()
+            .expect("functionResponse.id should be present");
+
+        assert_eq!(function_call_id, "toolu_1_abc");
+        assert_eq!(function_response_id, "toolu_1_abc");
+    }
+
+    #[test]
+    fn antigravity_convert_messages_preserves_signed_gemini_tool_calls() {
+        let assistant_content = OneOrMany::many(vec![AssistantContent::ToolCall(make_tool_call(
+            "call_1".to_string(),
+            "ping".to_string(),
+            serde_json::json!({"x": 1}),
+            Some("abc123+/==".to_string()),
+        ))])
+        .expect("assistant content should build");
+        let messages = OneOrMany::one(Message::Assistant {
+            id: None,
+            content: assistant_content,
+        });
+
+        let converted = convert_messages_to_antigravity_gemini(&messages, "gemini-3-flash");
+        assert!(converted[0]["parts"][0]["functionCall"].is_object());
+        assert_eq!(
+            converted[0]["parts"][0]["thoughtSignature"].as_str(),
+            Some("abc123+/==")
+        );
+    }
+
+    #[test]
+    fn antigravity_convert_messages_downgrades_unsigned_gemini_tool_calls_to_text() {
+        let assistant_content = OneOrMany::many(vec![AssistantContent::ToolCall(make_tool_call(
+            "call_1".to_string(),
+            "ping".to_string(),
+            serde_json::json!({"x": 1}),
+            None,
+        ))])
+        .expect("assistant content should build");
+        let messages = OneOrMany::one(Message::Assistant {
+            id: None,
+            content: assistant_content,
+        });
+
+        let converted = convert_messages_to_antigravity_gemini(&messages, "gemini-3-flash");
+        assert!(converted[0]["parts"][0]["functionCall"].is_null());
+        assert!(
+            converted[0]["parts"][0]["text"]
+                .as_str()
+                .expect("historical text should be present")
+                .contains("Historical context")
+        );
+    }
+
+    #[test]
+    fn parse_antigravity_response_preserves_tool_call_id_and_signature() {
+        let events = vec![serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "thoughtSignature": "abc123+/==",
+                            "functionCall": {
+                                "id": "tool_1",
+                                "name": "ping",
+                                "args": { "x": 1 }
+                            }
+                        }]
+                    }
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 5,
+                    "candidatesTokenCount": 3
+                }
+            }
+        })];
+
+        let parsed = parse_antigravity_response(events).expect("response should parse");
+        let tool_call = parsed
+            .choice
+            .iter()
+            .find_map(|item| match item {
+                AssistantContent::ToolCall(tc) => Some(tc),
+                _ => None,
+            })
+            .expect("tool call should be present");
+
+        assert_eq!(tool_call.id, "tool_1");
+        assert_eq!(tool_call.signature.as_deref(), Some("abc123+/=="));
+    }
+
+    #[test]
+    fn antigravity_upgrade_message_detector_matches_expected_text() {
+        assert!(is_antigravity_version_upgrade_message(
+            "Gemini 3.1 Pro is not available on this version. Please upgrade to the latest version."
+        ));
+        assert!(!is_antigravity_version_upgrade_message(
+            "Permission denied on resource project projects"
         ));
     }
 }
