@@ -223,6 +223,41 @@ impl LlmManager {
         }
     }
 
+    /// Force-refresh Antigravity OAuth credentials regardless of local expiry.
+    ///
+    /// Useful when provider returns 401 for a token that has not yet reached
+    /// `expires_at` locally (clock skew, remote invalidation, token rotation).
+    pub async fn force_refresh_antigravity_credentials(
+        &self,
+    ) -> Result<Option<AntigravityCredentials>> {
+        let mut creds_guard = self.antigravity_credentials.write().await;
+        let Some(creds) = creds_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        tracing::info!("forcing Antigravity OAuth token refresh after provider auth failure");
+        match creds.refresh().await {
+            Ok(new_creds) => {
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) =
+                        crate::auth::save_antigravity_credentials(instance_dir, &new_creds)
+                {
+                    tracing::warn!(
+                        %error,
+                        "failed to persist forced-refreshed Antigravity OAuth credentials"
+                    );
+                }
+                *creds_guard = Some(new_creds.clone());
+                tracing::info!("forced Antigravity OAuth token refresh succeeded");
+                Ok(Some(new_creds))
+            }
+            Err(error) => {
+                tracing::error!(%error, "forced Antigravity OAuth token refresh failed");
+                Ok(Some(creds.clone()))
+            }
+        }
+    }
+
     /// Resolve the Antigravity provider config, preferring OAuth credentials.
     pub async fn get_antigravity_provider(&self) -> Result<ProviderConfig> {
         let oauth = self.get_antigravity_credentials().await?;

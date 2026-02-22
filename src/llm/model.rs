@@ -894,6 +894,8 @@ impl SpacebotModel {
 
         let antigravity_versions = antigravity_user_agent_versions();
         let model_candidates = antigravity_model_candidates(&self.model_name);
+        let mut active_api_key = provider_config.api_key.clone();
+        let mut attempted_forced_oauth_refresh = false;
 
         let mut endpoints = vec!["https://daily-cloudcode-pa.sandbox.googleapis.com".to_string()];
         let configured = provider_config.base_url.trim_end_matches('/').to_string();
@@ -927,7 +929,7 @@ impl SpacebotModel {
                         .llm_manager
                         .http_client()
                         .post(&endpoint)
-                        .header("authorization", format!("Bearer {}", provider_config.api_key))
+                        .header("authorization", format!("Bearer {active_api_key}"))
                         .header("accept", "text/event-stream")
                         .header("content-type", "application/json")
                         .header(
@@ -960,6 +962,13 @@ impl SpacebotModel {
                     })?;
 
                     if is_antigravity_version_upgrade_message(&response_text) {
+                        tracing::warn!(
+                            requested_model = %self.model_name,
+                            attempted_model = %model_name,
+                            endpoint = %base_endpoint,
+                            antigravity_version = %antigravity_version,
+                            "Antigravity requested newer client version, trying next version"
+                        );
                         last_error = Some(CompletionError::ProviderError(format!(
                             "Antigravity requested newer client version at {base_endpoint} for model {model_name}"
                         )));
@@ -977,7 +986,74 @@ impl SpacebotModel {
                             "Antigravity API error ({status}) from {base_endpoint} using model {model_name}: {message}"
                         ));
 
+                        if status == reqwest::StatusCode::UNAUTHORIZED
+                            && is_antigravity_invalid_auth_message(&message)
+                        {
+                            if !attempted_forced_oauth_refresh {
+                                attempted_forced_oauth_refresh = true;
+                                match self
+                                    .llm_manager
+                                    .force_refresh_antigravity_credentials()
+                                    .await
+                                    .map_err(|error| {
+                                        CompletionError::ProviderError(error.to_string())
+                                    })? {
+                                    Some(credentials)
+                                        if credentials.access_token != active_api_key =>
+                                    {
+                                        tracing::warn!(
+                                            requested_model = %self.model_name,
+                                            selected_model = %model_name,
+                                            endpoint = %base_endpoint,
+                                            "Antigravity returned 401; refreshed OAuth token and retrying request"
+                                        );
+                                        active_api_key = credentials.access_token;
+                                        last_error = Some(CompletionError::ProviderError(
+                                            "Antigravity access token refreshed after 401"
+                                                .to_string(),
+                                        ));
+                                        continue;
+                                    }
+                                    Some(_) => {
+                                        tracing::warn!(
+                                            requested_model = %self.model_name,
+                                            selected_model = %model_name,
+                                            endpoint = %base_endpoint,
+                                            "Antigravity returned 401 and forced refresh did not change token"
+                                        );
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            requested_model = %self.model_name,
+                                            selected_model = %model_name,
+                                            endpoint = %base_endpoint,
+                                            "Antigravity returned 401 and no OAuth credentials are available for refresh"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Sandbox endpoint can reject a token that works on primary endpoint.
+                            if is_antigravity_sandbox_endpoint(base_endpoint) {
+                                tracing::warn!(
+                                    requested_model = %self.model_name,
+                                    selected_model = %model_name,
+                                    endpoint = %base_endpoint,
+                                    "Antigravity sandbox endpoint returned 401; trying next endpoint"
+                                );
+                                last_error = Some(error);
+                                continue;
+                            }
+                        }
+
                         if is_antigravity_version_upgrade_message(&message) {
+                            tracing::warn!(
+                                requested_model = %self.model_name,
+                                attempted_model = %model_name,
+                                endpoint = %base_endpoint,
+                                antigravity_version = %antigravity_version,
+                                "Antigravity error requested newer client version, trying next version"
+                            );
                             last_error = Some(error);
                             continue;
                         }
@@ -992,6 +1068,17 @@ impl SpacebotModel {
                             break;
                         }
 
+                        if status.as_u16() == 529 {
+                            tracing::warn!(
+                                requested_model = %self.model_name,
+                                selected_model = %model_name,
+                                endpoint = %base_endpoint,
+                                "Antigravity endpoint has no capacity (529); trying next endpoint"
+                            );
+                            last_error = Some(error);
+                            continue;
+                        }
+
                         return Err(error);
                     }
 
@@ -1001,6 +1088,15 @@ impl SpacebotModel {
                             "empty SSE response from Antigravity".into(),
                         ));
                     }
+
+                    tracing::info!(
+                        requested_model = %self.model_name,
+                        selected_model = %model_name,
+                        endpoint = %base_endpoint,
+                        antigravity_version = %antigravity_version,
+                        events = events.len(),
+                        "Antigravity request succeeded"
+                    );
 
                     return parse_antigravity_response(events);
                 }
@@ -1626,6 +1722,20 @@ fn is_antigravity_version_upgrade_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("not available on this version")
         || (lower.contains("upgrade") && lower.contains("latest version"))
+}
+
+fn is_antigravity_invalid_auth_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("invalid authentication credentials")
+        || lower.contains("expected oauth 2 access token")
+        || lower.contains("invalid_grant")
+        || (lower.contains("unauthenticated") && lower.contains("credential"))
+}
+
+fn is_antigravity_sandbox_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .to_ascii_lowercase()
+        .contains("daily-cloudcode-pa.sandbox.googleapis.com")
 }
 
 fn parse_sse_events(response_text: &str) -> Vec<serde_json::Value> {
