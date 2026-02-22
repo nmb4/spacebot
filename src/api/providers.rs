@@ -29,6 +29,7 @@ pub(super) struct ProviderStatus {
     moonshot: bool,
     kimi_coding: bool,
     zai_coding_plan: bool,
+    antigravity: bool,
 }
 
 #[derive(Serialize)]
@@ -86,6 +87,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "moonshot" => Some("moonshot_key"),
         "kimi-coding" => Some("kimi_coding_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
+        "antigravity" => Some("antigravity_key"),
         _ => None,
     }
 }
@@ -238,6 +240,12 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             api_key: credential.to_string(),
             name: None,
         }),
+        "antigravity" => Some(ProviderConfig {
+            api_type: ApiType::Antigravity,
+            base_url: "https://cloudcode-pa.googleapis.com".to_string(),
+            api_key: credential.to_string(),
+            name: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
+        }),
         _ => None,
     };
 
@@ -265,6 +273,8 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
         kimi_coding_key: (provider == "kimi-coding").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
+        antigravity_key: (provider == "antigravity").then(|| credential.to_string()),
+        antigravity_project_id: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
         providers,
     }
 }
@@ -293,6 +303,7 @@ pub(super) async fn get_providers(
         moonshot,
         kimi_coding,
         zai_coding_plan,
+        antigravity,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -334,6 +345,7 @@ pub(super) async fn get_providers(
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
             has_value("kimi_coding_key", "KIMI_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
+            has_value("antigravity_key", "ANTIGRAVITY_API_KEY"),
         )
     } else {
         (
@@ -355,11 +367,21 @@ pub(super) async fn get_providers(
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("KIMI_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
+            std::env::var("ANTIGRAVITY_API_KEY").is_ok(),
         )
     };
 
+    let (anthropic_oauth, antigravity_oauth) = if let Some(instance_dir) = config_path.parent() {
+        (
+            crate::auth::credentials_path(instance_dir).exists(),
+            crate::auth::antigravity_credentials_path(instance_dir).exists(),
+        )
+    } else {
+        (false, false)
+    };
+
     let providers = ProviderStatus {
-        anthropic,
+        anthropic: anthropic || anthropic_oauth,
         openai,
         openrouter,
         zhipu,
@@ -377,6 +399,7 @@ pub(super) async fn get_providers(
         moonshot,
         kimi_coding,
         zai_coding_plan,
+        antigravity: antigravity || antigravity_oauth,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -395,7 +418,8 @@ pub(super) async fn get_providers(
         || providers.minimax
         || providers.moonshot
         || providers.kimi_coding
-        || providers.zai_coding_plan;
+        || providers.zai_coding_plan
+        || providers.antigravity;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -473,6 +497,12 @@ pub(super) async fn update_provider(
             }));
         };
         doc["llm"][key_name] = toml_edit::value(credential);
+        if request.provider == "antigravity"
+            && let Ok(project_id) = std::env::var("ANTIGRAVITY_PROJECT_ID")
+            && !project_id.trim().is_empty()
+        {
+            doc["llm"]["antigravity_project_id"] = toml_edit::value(project_id);
+        }
     }
 
     if doc.get("defaults").is_none() {
@@ -650,6 +680,9 @@ pub(super) async fn delete_provider(
         if provider == "ollama" {
             table.remove("ollama_base_url");
             table.remove("ollama_key");
+        } else if provider == "antigravity" {
+            table.remove("antigravity_key");
+            table.remove("antigravity_project_id");
         } else {
             table.remove(key_name);
         }
