@@ -2,27 +2,54 @@
 
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::HashMap;
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const ANTHROPIC_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference";
 
-const ANTIGRAVITY_AUTH_BASE_URLS: &[&str] = &[
-    "https://auth.agentgateway.dev",
-    "https://auth.agentgateway.com",
-];
-const ANTIGRAVITY_OAUTH_CLIENT_ID: &str =
-    "336323648001-c5fqumriim5d2udondps7ce2s4155vsi.apps.googleusercontent.com";
-const ANTIGRAVITY_OAUTH_CLIENT_SECRET: &str = "R_PiQ6exBlywQqD_jj4g5v2B";
+const ANTIGRAVITY_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const ANTIGRAVITY_OAUTH_CLIENT_ID_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_ID";
+const ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV: &str = "ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const ANTIGRAVITY_MAX_POLL_ATTEMPTS: usize = 60;
-const ANTIGRAVITY_POLL_INTERVAL_SECS: u64 = 5;
+const ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
+const ANTIGRAVITY_CALLBACK_WAIT_TIMEOUT_SECS: u64 = 300;
+const ANTIGRAVITY_DEFAULT_PROJECT_ID: &str = "rising-fact-p41fc";
+const ANTIGRAVITY_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
+];
+
+fn antigravity_oauth_client_id() -> Result<String> {
+    std::env::var(ANTIGRAVITY_OAUTH_CLIENT_ID_ENV).with_context(|| {
+        format!(
+            "missing {} (required for Antigravity OAuth login)",
+            ANTIGRAVITY_OAUTH_CLIENT_ID_ENV
+        )
+    })
+}
+
+fn antigravity_oauth_client_secret() -> Result<String> {
+    std::env::var(ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV).with_context(|| {
+        format!(
+            "missing {} (required for Antigravity OAuth login)",
+            ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV
+        )
+    })
+}
 
 /// Stored Anthropic OAuth credentials.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,13 +139,15 @@ impl AntigravityCredentials {
             .refresh_token
             .as_ref()
             .context("missing refresh_token in antigravity credentials")?;
+        let client_id = antigravity_oauth_client_id()?;
+        let client_secret = antigravity_oauth_client_secret()?;
 
         let client = reqwest::Client::new();
         let body = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
-            ("client_id", ANTIGRAVITY_OAUTH_CLIENT_ID),
-            ("client_secret", ANTIGRAVITY_OAUTH_CLIENT_SECRET),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
         ];
 
         let response = client
@@ -173,17 +202,24 @@ impl AntigravityCredentials {
 }
 
 #[derive(Deserialize)]
-struct AntigravityAuthStartResponse {
-    url: Option<String>,
-    #[serde(rename = "signinUrl")]
-    signin_url: Option<String>,
-    #[serde(rename = "callbackUrl")]
-    callback_url: Option<String>,
+struct AntigravityCodeExchangeResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: i64,
+    token_type: Option<String>,
+    scope: Option<String>,
 }
 
-struct AntigravityAuthSession {
-    api_base_url: String,
-    auth_url: String,
+#[derive(Deserialize)]
+struct AntigravityLoadCodeAssistResponse {
+    #[serde(rename = "cloudaicompanionProject")]
+    cloudaicompanion_project: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct AntigravityCallbackResult {
+    code: String,
+    state: String,
 }
 
 /// PKCE verifier/challenge pair.
@@ -397,238 +433,365 @@ pub async fn login_interactive(instance_dir: &Path, mode: AuthMode) -> Result<OA
     Ok(credentials)
 }
 
-fn normalize_base_url(base_url: &str) -> String {
-    base_url.trim_end_matches('/').to_string()
+fn build_antigravity_auth_url(state: &str, code_challenge: &str) -> Result<String> {
+    let client_id = antigravity_oauth_client_id()?;
+    let mut params = Vec::new();
+    params.push(format!("client_id={}", urlencoding::encode(&client_id)));
+    params.push("response_type=code".to_string());
+    params.push(format!(
+        "redirect_uri={}",
+        urlencoding::encode(ANTIGRAVITY_REDIRECT_URI)
+    ));
+    params.push(format!(
+        "scope={}",
+        urlencoding::encode(&ANTIGRAVITY_SCOPES.join(" "))
+    ));
+    params.push(format!(
+        "code_challenge={}",
+        urlencoding::encode(code_challenge)
+    ));
+    params.push("code_challenge_method=S256".to_string());
+    params.push(format!("state={}", urlencoding::encode(state)));
+    params.push("access_type=offline".to_string());
+    params.push("prompt=consent".to_string());
+    Ok(format!("{ANTIGRAVITY_AUTH_URL}?{}", params.join("&")))
 }
 
-fn default_callback_url(base_url: &str, state: &str) -> String {
-    format!("{}/callback/{}", normalize_base_url(base_url), state)
+fn parse_query_string(value: &str) -> HashMap<String, String> {
+    let mut pairs = HashMap::new();
+    for pair in value.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = urlencoding::decode(key)
+            .map(|decoded| decoded.into_owned())
+            .unwrap_or_else(|_| key.to_string());
+        let parsed_value = urlencoding::decode(raw_value)
+            .map(|decoded| decoded.into_owned())
+            .unwrap_or_else(|_| raw_value.to_string());
+        pairs.insert(key, parsed_value);
+    }
+    pairs
 }
 
-fn default_signin_url_prefix(base_url: &str) -> String {
-    format!("{}/signin?url=", normalize_base_url(base_url))
-}
+fn parse_auth_code_input(input: &str) -> Option<AntigravityCallbackResult> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
 
-fn antigravity_auth_base_urls() -> Vec<String> {
-    let mut base_urls = Vec::new();
-
-    if let Ok(override_url) = std::env::var("ANTIGRAVITY_AUTH_BASE_URL") {
-        let override_url = override_url.trim();
-        if !override_url.is_empty() {
-            base_urls.push(normalize_base_url(override_url));
+    if let Some(query) = trimmed
+        .split_once('?')
+        .map(|(_prefix, query)| query)
+        .or_else(|| trimmed.strip_prefix('?'))
+    {
+        let pairs = parse_query_string(query);
+        if let Some(code) = pairs.get("code") {
+            return Some(AntigravityCallbackResult {
+                code: code.to_string(),
+                state: pairs.get("state").cloned().unwrap_or_default(),
+            });
         }
     }
 
-    // Backward-compatible override name used by earlier Spacebot versions.
-    if let Ok(override_url) = std::env::var("ANTIGRAVITY_AUTH_API_BASE_URL") {
-        let override_url = override_url.trim();
-        if !override_url.is_empty() {
-            base_urls.push(normalize_base_url(override_url));
+    if let Some((code, state)) = trimmed.split_once('#') {
+        if !code.is_empty() {
+            return Some(AntigravityCallbackResult {
+                code: code.to_string(),
+                state: state.to_string(),
+            });
         }
     }
 
-    for default_url in ANTIGRAVITY_AUTH_BASE_URLS {
-        let default_url = normalize_base_url(default_url);
-        if !base_urls.contains(&default_url) {
-            base_urls.push(default_url);
-        }
-    }
-
-    base_urls
+    Some(AntigravityCallbackResult {
+        code: trimmed.to_string(),
+        state: String::new(),
+    })
 }
 
-fn antigravity_poll_base_url(auth_base_url: &str) -> String {
-    let mut poll_base_url = normalize_base_url(auth_base_url);
-    poll_base_url = poll_base_url
-        .replace("https://auth.", "https://api.")
-        .replace("http://auth.", "http://api.");
-    if poll_base_url.ends_with(".dev") {
-        poll_base_url = format!(
-            "{}.com",
-            poll_base_url.trim_end_matches(".dev").trim_end_matches('/')
-        );
-    }
-    poll_base_url
+fn write_http_response(stream: &mut TcpStream, status_line: &str, body: &str) {
+    let response = format!(
+        "{status_line}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
 }
 
-/// Start Antigravity auth and return the auth session metadata.
-async fn antigravity_start_auth(state: &str) -> Result<AntigravityAuthSession> {
-    let client = reqwest::Client::new();
-    let mut errors = Vec::new();
+fn start_antigravity_callback_listener() -> Result<mpsc::Receiver<AntigravityCallbackResult>> {
+    let listener = TcpListener::bind(("127.0.0.1", 51121))
+        .context("failed to bind local OAuth callback server on 127.0.0.1:51121")?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to configure callback listener")?;
 
-    for auth_base_url in antigravity_auth_base_urls() {
-        let callback_url = default_callback_url(&auth_base_url, state);
-        let payload = serde_json::json!({
-            "callback_url": callback_url,
-            "state": state,
-            "user_agent": "spacebot/1.0",
-            "credentials": {
-                "mode": "credentials"
+    let (sender, receiver) = mpsc::channel::<AntigravityCallbackResult>();
+
+    std::thread::spawn(move || {
+        let deadline =
+            std::time::Instant::now() + Duration::from_secs(ANTIGRAVITY_CALLBACK_WAIT_TIMEOUT_SECS);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                break;
             }
-        });
 
+            match listener.accept() {
+                Ok((mut stream, _addr)) => {
+                    let mut buffer = [0_u8; 8192];
+                    let read_bytes = match stream.read(&mut buffer) {
+                        Ok(size) => size,
+                        Err(_) => continue,
+                    };
+                    if read_bytes == 0 {
+                        continue;
+                    }
+
+                    let request = String::from_utf8_lossy(&buffer[..read_bytes]);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let path = first_line.split_whitespace().nth(1).unwrap_or_default();
+
+                    if !path.starts_with("/oauth-callback") {
+                        write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 404 Not Found",
+                            "<html><body><h1>Not Found</h1></body></html>",
+                        );
+                        continue;
+                    }
+
+                    let query = path
+                        .split_once('?')
+                        .map(|(_prefix, query)| query)
+                        .unwrap_or_default();
+                    let pairs = parse_query_string(query);
+
+                    if let Some(error) = pairs.get("error") {
+                        write_http_response(
+                            &mut stream,
+                            "HTTP/1.1 400 Bad Request",
+                            &format!(
+                                "<html><body><h1>Authentication Failed</h1><p>Error: {error}</p><p>You can close this window.</p></body></html>"
+                            ),
+                        );
+                        continue;
+                    }
+
+                    let code = pairs.get("code").cloned();
+                    let state = pairs.get("state").cloned();
+                    match (code, state) {
+                        (Some(code), Some(state)) => {
+                            write_http_response(
+                                &mut stream,
+                                "HTTP/1.1 200 OK",
+                                "<html><body><h1>Authentication Successful</h1><p>You can close this window and return to the terminal.</p></body></html>",
+                            );
+                            let _ = sender.send(AntigravityCallbackResult { code, state });
+                            break;
+                        }
+                        _ => {
+                            write_http_response(
+                                &mut stream,
+                                "HTTP/1.1 400 Bad Request",
+                                "<html><body><h1>Authentication Failed</h1><p>Missing code or state parameter.</p></body></html>",
+                            );
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(receiver)
+}
+
+async fn exchange_antigravity_code(
+    code: &str,
+    verifier: &str,
+) -> Result<AntigravityCodeExchangeResponse> {
+    let client_id = antigravity_oauth_client_id()?;
+    let client_secret = antigravity_oauth_client_secret()?;
+    let client = reqwest::Client::new();
+    let body = [
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("code", code),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", ANTIGRAVITY_REDIRECT_URI),
+        ("code_verifier", verifier),
+    ];
+
+    let response = client
+        .post(ANTIGRAVITY_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&body)
+        .send()
+        .await
+        .context("failed to send antigravity token exchange request")?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read antigravity token exchange response")?;
+
+    if !status.is_success() {
+        anyhow::bail!("antigravity token exchange failed ({}): {}", status, body);
+    }
+
+    let parsed: AntigravityCodeExchangeResponse = serde_json::from_str(&body)
+        .context("failed to parse antigravity token exchange response")?;
+    Ok(parsed)
+}
+
+fn extract_project_id(payload: &serde_json::Value) -> Option<String> {
+    if let Some(project_id) = payload.as_str() {
+        if !project_id.is_empty() {
+            return Some(project_id.to_string());
+        }
+    }
+    if let Some(project_id) = payload.get("id").and_then(serde_json::Value::as_str) {
+        if !project_id.is_empty() {
+            return Some(project_id.to_string());
+        }
+    }
+    None
+}
+
+async fn discover_antigravity_project(access_token: &str) -> String {
+    let client = reqwest::Client::new();
+    let endpoints = [
+        "https://cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.sandbox.googleapis.com",
+    ];
+
+    for endpoint in endpoints {
         let response = match client
-            .post(format!("{auth_base_url}/auth"))
-            .json(&payload)
+            .post(format!("{endpoint}/v1internal:loadCodeAssist"))
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "google-api-nodejs-client/9.15.1")
+            .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+            .header(
+                "Client-Metadata",
+                r#"{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#,
+            )
+            .json(&serde_json::json!({
+                "metadata": {
+                    "ideType": "IDE_UNSPECIFIED",
+                    "platform": "PLATFORM_UNSPECIFIED",
+                    "pluginType": "GEMINI"
+                }
+            }))
             .send()
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                errors.push(format!("{auth_base_url}: {error}"));
-                continue;
-            }
+            Err(_) => continue,
         };
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("failed to read antigravity auth session response")?;
-
-        if status.as_u16() != 201 {
-            errors.push(format!(
-                "{auth_base_url}: antigravity auth session failed ({status}): {body}"
-            ));
+        if !response.status().is_success() {
             continue;
         }
 
-        let parsed: AntigravityAuthStartResponse = serde_json::from_str(&body)
-            .context("failed to parse antigravity auth session response")?;
-        let signin_url_prefix = parsed
-            .signin_url
-            .or(parsed.url)
-            .unwrap_or_else(|| default_signin_url_prefix(&auth_base_url));
-        let callback = parsed
-            .callback_url
-            .unwrap_or_else(|| default_callback_url(&auth_base_url, state));
-        let encoded_callback = STANDARD.encode(callback.as_bytes());
-        let auth_url = format!(
-            "{}{}",
-            signin_url_prefix,
-            urlencoding::encode(&encoded_callback)
-        );
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
 
-        return Ok(AntigravityAuthSession {
-            api_base_url: antigravity_poll_base_url(&auth_base_url),
-            auth_url,
-        });
+        let parsed: AntigravityLoadCodeAssistResponse = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if let Some(project_value) = parsed.cloudaicompanion_project
+            && let Some(project_id) = extract_project_id(&project_value)
+        {
+            return project_id;
+        }
     }
 
-    anyhow::bail!(
-        "failed to create antigravity auth session; tried {} endpoint(s): {}",
-        errors.len(),
-        errors.join(" | ")
-    );
+    ANTIGRAVITY_DEFAULT_PROJECT_ID.to_string()
 }
 
-async fn antigravity_poll_for_credentials(
-    api_base_url: &str,
-    state: &str,
-) -> Result<serde_json::Value> {
-    let client = reqwest::Client::new();
-    for attempt in 1..=ANTIGRAVITY_MAX_POLL_ATTEMPTS {
-        let response = client
-            .get(format!("{}/auth/{state}", normalize_base_url(api_base_url)))
-            .send()
-            .await
-            .with_context(|| format!("failed polling antigravity auth (attempt {attempt})"))?;
-
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("failed to read antigravity polling response")?;
-
-        if status.as_u16() == 404 || status.as_u16() == 202 || body.trim() == "pending" {
-            tokio::time::sleep(std::time::Duration::from_secs(
-                ANTIGRAVITY_POLL_INTERVAL_SECS,
-            ))
-            .await;
-            continue;
-        }
-
-        if !status.is_success() {
-            anyhow::bail!("antigravity polling failed ({}): {}", status, body);
-        }
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&body).context("failed to parse antigravity polling response")?;
-        return Ok(parsed);
-    }
-
-    anyhow::bail!(
-        "timed out waiting for antigravity authorization after {} seconds",
-        ANTIGRAVITY_MAX_POLL_ATTEMPTS * ANTIGRAVITY_POLL_INTERVAL_SECS as usize
-    )
-}
-
-fn parse_antigravity_credentials(payload: &serde_json::Value) -> Result<AntigravityCredentials> {
-    let credential_block = payload.get("credentials").unwrap_or(payload);
-    let access_token = credential_block
-        .get("access_token")
-        .or_else(|| credential_block.get("accessToken"))
-        .and_then(serde_json::Value::as_str)
-        .context("antigravity credentials missing access_token")?
-        .to_string();
-    let refresh_token = credential_block
-        .get("refresh_token")
-        .or_else(|| credential_block.get("refreshToken"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-    let expires_at = credential_block
-        .get("expiry_date")
-        .or_else(|| credential_block.get("expires_at"))
-        .or_else(|| credential_block.get("expiresAt"))
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 55 * 60 * 1000);
-    let token_type = credential_block
-        .get("token_type")
-        .or_else(|| credential_block.get("tokenType"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-    let scope = credential_block
-        .get("scope")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-    let project_id = credential_block
-        .get("project_id")
-        .or_else(|| credential_block.get("projectId"))
-        .or_else(|| payload.get("project_id"))
-        .or_else(|| payload.get("projectId"))
-        .and_then(serde_json::Value::as_str)
-        .context("antigravity credentials missing project_id")?
-        .to_string();
-
-    Ok(AntigravityCredentials {
-        access_token,
-        refresh_token,
-        expires_at,
-        token_type,
-        scope,
-        project_id,
-    })
+fn read_line_trimmed(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    let mut value = String::new();
+    std::io::stdin()
+        .read_line(&mut value)
+        .context("failed to read input from stdin")?;
+    Ok(value.trim().to_string())
 }
 
 /// Run interactive Antigravity OAuth login flow.
 pub async fn antigravity_login_interactive(instance_dir: &Path) -> Result<AntigravityCredentials> {
-    let state = uuid::Uuid::new_v4().to_string();
-    let session = antigravity_start_auth(&state)
-        .await
-        .context("automatic OAuth start failed")?;
+    let pkce = generate_pkce();
+    let auth_url = build_antigravity_auth_url(&pkce.verifier, &pkce.challenge)?;
+    let callback_receiver = start_antigravity_callback_listener().ok();
 
     eprintln!("Open this URL in your browser:\n");
-    eprintln!("  {}\n", session.auth_url);
-    eprintln!("Waiting for authorization callback...");
+    eprintln!("  {auth_url}\n");
+    eprintln!("Sign in with your Google account.");
+    eprintln!();
 
-    if let Err(_error) = open::that(&session.auth_url) {
+    if let Err(_error) = open::that(&auth_url) {
         eprintln!("(Could not open browser automatically, please copy the URL above)");
     }
 
-    let payload = antigravity_poll_for_credentials(&session.api_base_url, &state)
+    let callback_result = if let Some(receiver) = callback_receiver {
+        eprintln!(
+            "Waiting up to {} seconds for callback on {} ...",
+            ANTIGRAVITY_CALLBACK_WAIT_TIMEOUT_SECS, ANTIGRAVITY_REDIRECT_URI
+        );
+        match tokio::task::spawn_blocking(move || {
+            receiver.recv_timeout(Duration::from_secs(ANTIGRAVITY_CALLBACK_WAIT_TIMEOUT_SECS))
+        })
         .await
-        .context("automatic OAuth callback did not complete")?;
-    let credentials = parse_antigravity_credentials(&payload)?;
+        {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let callback_result = if let Some(result) = callback_result {
+        result
+    } else {
+        eprintln!("Automatic callback was not received.");
+        eprintln!("Paste the full redirect URL from your browser (or paste just the code):");
+        let input = read_line_trimmed("> ")?;
+        parse_auth_code_input(&input).context(
+            "failed to parse authorization response; expected URL containing code and state",
+        )?
+    };
+
+    if !callback_result.state.is_empty() && callback_result.state != pkce.verifier {
+        anyhow::bail!("OAuth state mismatch - authentication aborted");
+    }
+
+    eprintln!("Exchanging authorization code for tokens...");
+    let token_response = exchange_antigravity_code(&callback_result.code, &pkce.verifier).await?;
+
+    let refresh_token = token_response
+        .refresh_token
+        .context("no refresh token returned; retry login and ensure consent is granted")?;
+    let expires_at =
+        chrono::Utc::now().timestamp_millis() + token_response.expires_in * 1000 - 5 * 60 * 1000;
+    let project_id = discover_antigravity_project(&token_response.access_token).await;
+
+    let credentials = AntigravityCredentials {
+        access_token: token_response.access_token,
+        refresh_token: Some(refresh_token),
+        expires_at,
+        token_type: token_response.token_type,
+        scope: token_response.scope,
+        project_id,
+    };
 
     save_antigravity_credentials(instance_dir, &credentials)
         .context("failed to save antigravity credentials")?;
