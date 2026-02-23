@@ -15,7 +15,7 @@ use crate::{
 };
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
-use rig::message::{ImageMediaType, MimeType, UserContent};
+use rig::message::{AssistantContent, ImageMediaType, Message, MimeType, UserContent};
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
@@ -906,6 +906,14 @@ impl Channel {
             let guard = self.state.history.read().await;
             guard.clone()
         };
+        let repaired_count = sanitize_tool_call_history(&mut history);
+        if repaired_count > 0 {
+            tracing::warn!(
+                channel_id = %self.id,
+                repaired_count,
+                "removed malformed assistant tool-call history entries before LLM call"
+            );
+        }
         let history_len_before = history.len();
 
         let mut result = agent
@@ -1735,6 +1743,89 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
     None
 }
 
+/// Remove malformed assistant tool-call messages that are not followed by
+/// matching tool-result content. This prevents provider-side 400s caused by
+/// dangling tool calls in persisted history.
+fn sanitize_tool_call_history(history: &mut Vec<Message>) -> usize {
+    let mut sanitized = Vec::with_capacity(history.len());
+    let mut removed_count = 0usize;
+    let mut index = 0usize;
+
+    while index < history.len() {
+        let message = &history[index];
+        let Some(expected_tool_call_ids) = extract_tool_call_ids(message) else {
+            sanitized.push(message.clone());
+            index += 1;
+            continue;
+        };
+
+        let mut pending = expected_tool_call_ids;
+        let mut candidate_tool_result_messages = Vec::new();
+        let mut cursor = index + 1;
+
+        while cursor < history.len() && !pending.is_empty() {
+            match &history[cursor] {
+                Message::User { content } => {
+                    let mut tool_result_ids_in_message = Vec::new();
+                    for item in content.iter() {
+                        if let UserContent::ToolResult(tool_result) = item {
+                            tool_result_ids_in_message.push(tool_result.id.clone());
+                        } else {
+                            tool_result_ids_in_message.clear();
+                            break;
+                        }
+                    }
+
+                    if tool_result_ids_in_message.is_empty() {
+                        break;
+                    }
+
+                    for tool_result_id in &tool_result_ids_in_message {
+                        pending.remove(tool_result_id);
+                    }
+                    candidate_tool_result_messages.push(history[cursor].clone());
+                    cursor += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if pending.is_empty() {
+            sanitized.push(message.clone());
+            sanitized.extend(candidate_tool_result_messages);
+            index = cursor;
+        } else {
+            removed_count += 1;
+            index += 1;
+        }
+    }
+
+    if removed_count > 0 {
+        *history = sanitized;
+    }
+
+    removed_count
+}
+
+fn extract_tool_call_ids(message: &Message) -> Option<std::collections::HashSet<String>> {
+    let Message::Assistant { content, .. } = message else {
+        return None;
+    };
+
+    let mut tool_call_ids = std::collections::HashSet::new();
+    for item in content.iter() {
+        if let AssistantContent::ToolCall(tool_call) = item {
+            tool_call_ids.insert(tool_call.id.clone());
+        }
+    }
+
+    if tool_call_ids.is_empty() {
+        None
+    } else {
+        Some(tool_call_ids)
+    }
+}
+
 /// Format a user message with sender attribution from message metadata.
 ///
 /// In multi-user channels, this lets the LLM distinguish who said what.
@@ -2232,9 +2323,10 @@ fn apply_history_after_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_history_after_turn;
+    use super::*;
     use rig::completion::{CompletionError, PromptError};
-    use rig::message::Message;
+    use rig::message::{Message, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent};
+    use rig::one_or_many::OneOrMany;
     use rig::tool::ToolSetError;
 
     fn user_msg(text: &str) -> Message {
@@ -2464,5 +2556,75 @@ mod tests {
             !has_dangling,
             "no dangling tool-call messages in history after rollback"
         );
+    }
+
+    #[test]
+    fn sanitize_tool_call_history_removes_dangling_tool_call_messages() {
+        let assistant_content = OneOrMany::one(AssistantContent::ToolCall(ToolCall {
+            id: "reply:2".to_string(),
+            call_id: None,
+            function: ToolFunction {
+                name: "reply".to_string(),
+                arguments: serde_json::json!({"content": "hello"}),
+            },
+            signature: None,
+            additional_params: None,
+        }));
+
+        let mut history = vec![
+            Message::from("user: hi"),
+            Message::Assistant {
+                id: None,
+                content: assistant_content,
+            },
+            Message::from("user: follow-up"),
+        ];
+
+        let removed = sanitize_tool_call_history(&mut history);
+
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history[0], Message::User { .. }));
+        assert!(matches!(history[1], Message::User { .. }));
+    }
+
+    #[test]
+    fn sanitize_tool_call_history_keeps_valid_tool_call_sequences() {
+        let assistant_content = OneOrMany::one(AssistantContent::ToolCall(ToolCall {
+            id: "reply:2".to_string(),
+            call_id: None,
+            function: ToolFunction {
+                name: "reply".to_string(),
+                arguments: serde_json::json!({"content": "hello"}),
+            },
+            signature: None,
+            additional_params: None,
+        }));
+        let tool_result_content = OneOrMany::one(ToolResultContent::Text(Text {
+            text: "ok".to_string(),
+        }));
+        let user_content = OneOrMany::one(UserContent::ToolResult(ToolResult {
+            id: "reply:2".to_string(),
+            call_id: None,
+            content: tool_result_content,
+        }));
+
+        let mut history = vec![
+            Message::from("user: hi"),
+            Message::Assistant {
+                id: None,
+                content: assistant_content,
+            },
+            Message::User {
+                content: user_content,
+            },
+            Message::from("user: follow-up"),
+        ];
+
+        let removed = sanitize_tool_call_history(&mut history);
+
+        assert_eq!(removed, 0);
+        assert_eq!(history.len(), 4);
+        assert!(matches!(history[1], Message::Assistant { .. }));
     }
 }

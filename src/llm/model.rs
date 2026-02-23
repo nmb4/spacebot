@@ -1218,6 +1218,11 @@ fn convert_messages_to_openai(
                     }
                 }
 
+                // OpenAI requires tool result messages to immediately follow the
+                // assistant tool call. Emit tool results first when both are
+                // present in the same Rig user message.
+                result.extend(tool_results);
+
                 if !content_parts.is_empty() {
                     // If there's only one text part and no images, use simple string format
                     if content_parts.len() == 1 && content_parts[0]["type"] == "text" {
@@ -1233,8 +1238,6 @@ fn convert_messages_to_openai(
                         }));
                     }
                 }
-
-                result.extend(tool_results);
             }
             Message::Assistant { content, .. } => {
                 let mut text_parts = Vec::new();
@@ -2274,6 +2277,33 @@ mod tests {
 
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["reasoning_content"], "first\nsecond");
+    }
+
+    #[test]
+    fn convert_messages_to_openai_emits_tool_results_before_user_text_when_mixed() {
+        let user_content = OneOrMany::many(vec![
+            UserContent::Text(Text {
+                text: "follow-up".to_string(),
+            }),
+            UserContent::ToolResult(rig::message::ToolResult {
+                id: "reply:2".to_string(),
+                call_id: None,
+                content: OneOrMany::one(rig::message::ToolResultContent::Text(Text {
+                    text: "ok".to_string(),
+                })),
+            }),
+        ])
+        .expect("user content should build");
+        let messages = OneOrMany::one(Message::User {
+            content: user_content,
+        });
+
+        let converted = convert_messages_to_openai(&messages, false);
+
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0]["role"], "tool");
+        assert_eq!(converted[0]["tool_call_id"], "reply:2");
+        assert_eq!(converted[1]["role"], "user");
     }
 
     #[test]
